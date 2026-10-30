@@ -1,155 +1,145 @@
-MICROSOFT SMTP OAUTH 2.1.0 - QUICK START
--------------------------------------------
-Supports personal Outlook.com and Microsoft 365 / Exchange Online.
-Run Linux commands as root in Bash. One mailbox is active at a time.
+MICROSOFT SMTP OAUTH 2.1.0
+
+Local Postfix relay for Outlook.com or Microsoft 365 / Exchange Online.
+Targets RHEL, Oracle Linux and AlmaLinux 8, 9 and 10; validate your host before
+production. Run as root in Bash, one command at a time. Stop on errors.
+One sending mailbox; applications submit to 127.0.0.1:25.
+
 
 1. PREPARE LINUX
-------------------
-The host needs standard Postfix, IPv4/IPv6 loopback, correct time, working DNS,
-and outbound HTTPS 443 plus SMTP 587. The application submits locally to
-127.0.0.1:25. The script checks Enterprise Linux 8/9/10 capabilities.
 
-For a clean AlmaLinux 9 lab, install:
+Use a standard, dedicated Postfix host with IPv4/IPv6 loopback, working DNS,
+correct time, and outbound TCP 443/587.
+
+Enable approved EPEL/dependency repositories for your distribution.
+AlmaLinux 9 lab example:
 
 dnf install -y dnf-plugins-core
 dnf config-manager --set-enabled crb
 dnf install -y epel-release
+
+Then install the required packages:
+
 dnf install -y postfix sasl-xoauth2 cyrus-sasl jq curl ca-certificates policycoreutils-python-utils iproute util-linux
 
-On Oracle Linux/RHEL, use the client's approved repositories for these packages.
-sasl-xoauth2 must be 0.24 or newer. Stop if any package command fails.
+sasl-xoauth2 must be version 0.24 or newer.
 
-2. EXTRACT AND CHECK
-----------------------
-Upload the archive to /root/SMTP_OAuth_Microsoft_v2.1.0.tar.gz, then run:
 
-bash
+2. DOWNLOAD AND CHECK
+
 umask 077
 install -d -m 700 /root/smtp-oauth-microsoft
-tar -xzf /root/SMTP_OAuth_Microsoft_v2.1.0.tar.gz --strip-components=1 -C /root/smtp-oauth-microsoft
-chmod 700 /root/smtp-oauth-microsoft
 cd /root/smtp-oauth-microsoft
-sha256sum -c SHA256SUMS.txt
+curl -fL https://raw.githubusercontent.com/marmar-2401/smtp-oauth-cli/main/smtp-oauth-cli/smtp-oauth-deploy.sh -o smtp-oauth-deploy.sh
 bash smtp-oauth-deploy.sh check
 
-Expected: all checksums say OK and Local prerequisites passed.
-Use this new folder for this version. Existing 2.0.x installations remain
-manageable with status/uninstall; do not run install over an installed relay.
+Continue only after "Local prerequisites passed".
+Step 4 tests authorization and delivery.
 
-3. GET client.json - CHOOSE ONE ROUTE
----------------------------------------
-M365 prerequisite for BOTH routes: admin.microsoft.com > Users > Active users
-> sender > Mail > Manage email apps > enable Authenticated SMTP. Tenant policy
-must also permit SMTP OAuth. Security Defaults can block it; the mailbox
-checkbox alone is insufficient. Resolve that with the tenant administrator.
 
-CLIENT ALREADY PROVIDED CREDENTIALS:
-Have the client fill the matching outlook-client-template.json or
-m365-client-template.json and securely provide it as:
-/root/smtp-oauth-microsoft/client.json
+3. AUTHORIZE THE SENDING MAILBOX
 
-Replace all REPLACE_WITH values. Use a REFRESH token issued to the matching
-application and sending mailbox, not an access token or mailbox password.
-For a Microsoft public client, client_secret stays empty. A supplied confidential
-grant needs its matching secret VALUE. M365 tenant is the Directory tenant GUID.
-Save as UTF-8. Skip the account setup below and continue at step 4.
+For M365, enable Authenticated SMTP at https://admin.microsoft.com/ > Users
+> Active users > sender > Mail > Manage email apps. Tenant policy must allow
+SMTP OAuth; Security Defaults can block it. Ask the administrator to resolve
+policy restrictions.
 
-NEW LAB / NO REFRESH TOKEN YET:
-You need access to an Entra tenant where you can register an app. A personal
-Outlook mailbox alone does not provide those rights. M365 additionally needs
-a licensed Exchange Online mailbox that can already send through Outlook web.
+Already have credentials?
+Download the matching outlook-client-template.json or m365-client-template.json
+from this repo, fill it in, and securely save it as
+/root/smtp-oauth-microsoft/client.json. Continue at step 4.
+Use UTF-8 and replace every placeholder with the matching app/mailbox REFRESH
+token and IDs. Public clients leave client_secret empty; confidential grants
+need the matching secret VALUE. For M365, tenant is the Directory tenant GUID.
+
+New authorization requires Entra app-registration rights; a personal Outlook
+account alone does not provide them. M365 also needs a licensed Exchange
+Online mailbox.
 
 On your PC, open https://entra.microsoft.com/:
-- Entra ID > App registrations > New registration. Name: SCC SMTP OAuth.
-- Accounts: Personal Microsoft accounts only for Outlook; Single tenant for M365.
-- Leave Redirect URI empty. Register and copy Application (client) ID.
-  For M365, also copy Directory (tenant) ID. Do not use Object ID.
-- Authentication > Advanced settings > Allow public client flows = Yes; Save.
-- API permissions > Add a permission > Microsoft Graph > Delegated permissions.
-  Add SMTP.Send and offline_access. Obtain any required administrator consent.
-- Create no client secret for this public-client lab.
+- App registrations > New registration. Name it SMTP OAuth.
+- Choose Personal Microsoft accounts only for Outlook.com, or Single tenant
+  for Microsoft 365. Leave Redirect URI empty.
+- Register and copy the Application (client) ID. For M365, also copy the
+  Directory (tenant) ID.
+- Under Authentication, enable Allow public client flows and save.
+- API permissions > Add a permission > Microsoft Graph > Delegated permissions:
+  add SMTP.Send and offline_access. Obtain any required administrator consent.
+- Do not create a client secret for this public-client flow.
 
-For authorize, M365 tenant policy must also permit device-code sign-in.
-A supplied grant skips this initial flow but cannot bypass an SMTP AUTH block.
+Back on Linux, choose m365 or outlook:
 
-Back in the Linux terminal, enter outlook or m365 at the first prompt:
+read -r -p 'Provider (m365 or outlook): ' provider
+bash smtp-oauth-deploy.sh authorize --provider "$provider" --output /root/smtp-oauth-microsoft/client.json
 
-read -r -p 'Provider (outlook or m365): ' lab_provider
-bash smtp-oauth-deploy.sh authorize --provider "$lab_provider" --output /root/smtp-oauth-microsoft/client.json
+Enter the requested IDs and sending mailbox. Leave the terminal open.
+On your PC, open the displayed Microsoft URL, enter its code, and sign in
+as the SENDING mailbox. The script saves client.json directly.
 
-Enter the client ID, sending mailbox and, for M365, tenant GUID when prompted.
-Leave the terminal open. In your PC browser, open the displayed Microsoft URL,
-enter its code and complete sign-in/MFA as the SENDING mailbox.
+Device-code sign-in must be allowed. Existing files are preserved; choose
+a new filename and use that path throughout.
 
-Expected: Created protected configuration: /root/smtp-oauth-microsoft/client.json
-The script writes the JSON directly. The server needs no browser; approve the
-sign-in on your PC.
 
 4. INSTALL AND TEST
----------------------
-Pause application mail submissions for this change. Run each line separately;
-stop if one fails. The queue must be empty before installing a different relay.
+
+Pause application mail submissions. The queue must be empty before installing.
+Do not install over an existing managed relay.
 
 chown root:root /root/smtp-oauth-microsoft/client.json
 chmod 600 /root/smtp-oauth-microsoft/client.json
 postqueue -p
 bash smtp-oauth-deploy.sh install --config /root/smtp-oauth-microsoft/client.json --yes
-read -r -p 'Test recipient address: ' test_recipient
-bash smtp-oauth-deploy.sh test --recipient "$test_recipient" --force-refresh --yes
+read -r -p 'Test recipient address: ' recipient
+bash smtp-oauth-deploy.sh test --recipient "$recipient" --force-refresh --yes
 bash smtp-oauth-deploy.sh status
 
-Require BOTH "token-file update ... observed" and "RELAY ACCEPTED", then confirm
-the message arrived in the recipient's inbox/junk. The forced test briefly
-restarts Postfix. A local queue ID alone does not prove delivery.
+Require both a token-file update reported as "observed" and "RELAY ACCEPTED".
+Then confirm the message arrived in the recipient's inbox or junk folder.
+The forced-refresh test briefly restarts Postfix.
 
-Normal access-token refresh is automatic when Postfix sends; no cron job is
-needed. Test the real application's sender too: this script does not
-rewrite From/envelope addresses; the provider must authorize the sender.
+No cron job: tokens refresh when mail is sent. Test the application using
+an authorized sender; the script does not rewrite addresses.
 
-5. NORMAL COMMANDS
----------------------
-Status:
+
+5. MANAGE THE RELAY
+
+For later sessions, return to the working folder:
+cd /root/smtp-oauth-microsoft
+
+Check status:
 bash smtp-oauth-deploy.sh status
 
 Send another test:
-read -r -p 'Test recipient address: ' test_recipient
-bash smtp-oauth-deploy.sh test --recipient "$test_recipient" --yes
+read -r -p 'Test recipient address: ' recipient
+bash smtp-oauth-deploy.sh test --recipient "$recipient" --yes
 
-Replace revoked/expired authorization for the SAME mailbox:
----------------------------------------------------------------
-Obtain a new protected replacement.json using the same route as step 3.
-Then run:
+Replace authorization for the SAME provider, mailbox and tenant:
+Create replacement.json using step 3, then run:
+chown root:root /root/smtp-oauth-microsoft/replacement.json
+chmod 600 /root/smtp-oauth-microsoft/replacement.json
 bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth-microsoft/replacement.json --yes
-read -r -p 'Test recipient address: ' test_recipient
-bash smtp-oauth-deploy.sh test --recipient "$test_recipient" --force-refresh --yes
+Repeat the forced-refresh test from step 4.
 
-Remove or switch providers:
------------------------------
-Pause submissions, review/resolve queued mail, then run:
-postqueue -p
+Remove the relay or change provider, mailbox or tenant:
+Pause submissions and resolve queued mail, then run:
 bash smtp-oauth-deploy.sh uninstall --yes
-Removal restores prior managed settings/service state. Input JSON and cloud
-consent remain. For a different provider, use a new configuration filename and
-supply that same filename to install --config.
+
+Removal restores prior managed settings and service state. It leaves input
+JSON, queued mail, packages and Microsoft consent in place. To switch accounts,
+authorize a new configuration filename, then install using that file.
+
 
 IF SOMETHING FAILS
 
-Package/DNS error: fix repository or network access before continuing.
-Output file exists: use a new filename and use it in install --config too.
-Microsoft asks for client_secret: recheck Allow public client flows for the lab app.
-AADSTS/policy error: check the code, correct account/tenant, consent and tenant policy.
-Token exchange passes but SMTP fails: check SMTP AUTH, sending mailbox and port 587.
-Credentials contain &, + or %: the reviewed plugin cannot safely refresh them;
-do not edit the issued values. Use a corrected and qualified plugin build.
-Managed drift/recovery error: preserve the state files and review the reported
-change; do not delete state to force past it. Older 1.x installs need their old
-script's uninstaller first.
+Read the reported error and stop. Check the queue and delivery logs:
 
-Useful checks:
 postqueue -p
 journalctl -b -t postfix/smtp --no-pager -n 50
 
-If journal output is empty, check /var/log/maillog.
-Use the queue ID from the test to find its logs. Never share client.json, token
-files or raw OAuth traces. Refresh grants can be revoked or require a new
-interactive sign-in even though routine access-token renewal is automatic.
+If the journal is empty, check /var/log/maillog. Match the test's queue ID.
+For Microsoft errors, check the account, tenant, consent, SMTP AUTH and policy.
+This release rejects OAuth credentials containing &, + or %; never edit
+issued tokens. That limitation needs a qualified script/plugin update.
+Preserve state files if recovery or configuration-drift errors are reported.
+
+Keep credential JSON, token files and raw OAuth traces out of GitHub.
