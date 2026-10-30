@@ -1,0 +1,7 @@
+{
+  "provider": "outlook",
+  "mailbox": "REPLACE_WITH_SENDING_MAILBOX",
+  "client_id": "REPLACE_WITH_CLIENT_ID",
+  "client_secret": "",
+  "refresh_token": "REPLACE_WITH_REFRESH_TOKEN"
+}
