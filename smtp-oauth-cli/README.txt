@@ -1,10 +1,10 @@
 MICROSOFT SMTP OAUTH 2.1.0 - QUICK START
-
+-------------------------------------------
 Supports personal Outlook.com and Microsoft 365 / Exchange Online.
 Run Linux commands as root in Bash. One mailbox is active at a time.
 
 1. PREPARE LINUX
-
+------------------
 The host needs standard Postfix, IPv4/IPv6 loopback, correct time, working DNS,
 and outbound HTTPS 443 plus SMTP 587. The application submits locally to
 127.0.0.1:25. The script checks Enterprise Linux 8/9/10 capabilities.
@@ -20,7 +20,7 @@ On Oracle Linux/RHEL, use the client's approved repositories for these packages.
 sasl-xoauth2 must be 0.24 or newer. Stop if any package command fails.
 
 2. EXTRACT AND CHECK
-
+----------------------
 Upload the archive to /root/SMTP_OAuth_Microsoft_v2.1.0.tar.gz, then run:
 
 bash
@@ -37,7 +37,7 @@ Use this new folder for this version. Existing 2.0.x installations remain
 manageable with status/uninstall; do not run install over an installed relay.
 
 3. GET client.json - CHOOSE ONE ROUTE
-
+---------------------------------------
 M365 prerequisite for BOTH routes: admin.microsoft.com > Users > Active users
 > sender > Mail > Manage email apps > enable Authenticated SMTP. Tenant policy
 must also permit SMTP OAuth. Security Defaults can block it; the mailbox
@@ -86,7 +86,7 @@ The script writes the JSON directly. The server needs no browser; approve the
 sign-in on your PC.
 
 4. INSTALL AND TEST
-
+---------------------
 Pause application mail submissions for this change. Run each line separately;
 stop if one fails. The queue must be empty before installing a different relay.
 
@@ -107,7 +107,7 @@ needed. Test the real application's sender too: this script does not
 rewrite From/envelope addresses; the provider must authorize the sender.
 
 5. NORMAL COMMANDS
-
+---------------------
 Status:
 bash smtp-oauth-deploy.sh status
 
@@ -116,6 +116,7 @@ read -r -p 'Test recipient address: ' test_recipient
 bash smtp-oauth-deploy.sh test --recipient "$test_recipient" --yes
 
 Replace revoked/expired authorization for the SAME mailbox:
+---------------------------------------------------------------
 Obtain a new protected replacement.json using the same route as step 3.
 Then run:
 bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth-microsoft/replacement.json --yes
@@ -123,6 +124,7 @@ read -r -p 'Test recipient address: ' test_recipient
 bash smtp-oauth-deploy.sh test --recipient "$test_recipient" --force-refresh --yes
 
 Remove or switch providers:
+-----------------------------
 Pause submissions, review/resolve queued mail, then run:
 postqueue -p
 bash smtp-oauth-deploy.sh uninstall --yes
@@ -151,12 +153,3 @@ If journal output is empty, check /var/log/maillog.
 Use the queue ID from the test to find its logs. Never share client.json, token
 files or raw OAuth traces. Refresh grants can be revoked or require a new
 interactive sign-in even though routine access-token renewal is automatic.
-
-Verified locally: Bash syntax; 27 deployment and 16 authorization test groups.
-Live Microsoft sign-in, SMTP delivery and the actual client OS still need testing.
-
-Official references:
-https://github.com/tarickb/sasl-xoauth2
-https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth
-https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/authenticated-client-smtp-submission
-https://learn.microsoft.com/en-us/entra/fundamentals/security-defaults
