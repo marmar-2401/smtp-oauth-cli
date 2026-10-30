@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set +x
-# SCC Soft Computer SMTP OAuth CLI. Packages and provider consent are prepared separately.
-# One delegated OAuth mailbox; sasl-xoauth2 owns refresh during SMTP authentication.
+
 VERSION=2.1.0
 STATE=/var/lib/smtp-oauth-cli
 TOKENDIR=/var/spool/postfix/smtp-oauth-cli
@@ -86,8 +85,7 @@ helper_refresh() {
     if ! timeout 90 runuser -u postfix -- "$CONFIG_TEST" --config "$config" >"$WORK/helper.log" 2>&1; then
         die 'XOAUTH2 configuration validation failed. Check the installed helper and protected configuration; raw helper output is withheld.'
     fi
-    # test-token-refresh in sasl-xoauth2 0.24 does not save token rotations.
-    # Bootstrap exactly once here; the plugin alone performs ongoing refresh.
+    
     jq -nj --slurpfile config "$config" --slurpfile token "$token" '
       $config[0] as $c | $token[0] as $t |
       (["grant_type=refresh_token", "client_id="+($c.client_id|@uri), "refresh_token="+($t.refresh_token|@uri)] +
@@ -202,7 +200,7 @@ managed_settings() {
 load_state() {
     protected_file "$STATE/manifest.json"
     [[ $(stat -c '%u:%a' "$STATE") == 0:700 ]] || die 'The protected state directory must be owned by root with mode 700.'
-    # Retain the unchanged 2.0.x state schema for existing installations and removal.
+    
     jq -e --arg version "$VERSION" '(.version == $version or .version == "2.0.0" or .version == "2.0.1") and (.status == "installed" or .status == "installing" or .status == "removing") and
       (.backend == "hash" or .backend == "lmdb") and (.active | type == "boolean") and
       (.enabled == "enabled" or .enabled == "disabled") and (.chroot == "n" or .chroot == "y" or .chroot == "-")' "$STATE/manifest.json" >/dev/null || die 'Unknown or damaged recovery manifest; use its matching script and retain the backup.'
@@ -212,7 +210,7 @@ load_state() {
     case "$provider:$relay" in
         outlook:smtp-mail.outlook.com|m365:smtp.office365.com) ;;
         google:smtp.gmail.com)
-            # Legacy Gmail is retained only for status and safe removal.
+            
             case "$(jq -r .version "$STATE/manifest.json")" in
                 2.0.0|2.0.1) ;; *) die 'Gmail recovery requires a legacy 2.0.x manifest.' ;;
             esac ;;
@@ -307,8 +305,7 @@ guard_permissions() {
         [[ $(stat -c '%U:%G:%a' "$path") == root:postfix:640 ]] || die 'Managed configuration/map ownership or permissions changed; restore root:postfix mode 640.'
     done
     [[ $(stat -c '%U:%G:%a' "$TOKENDIR") == postfix:postfix:700 ]] || die 'The runtime directory must be postfix:postfix mode 700.'
-    # Upstream atomically replaces tokens using the Postfix umask (often 022).
-    # The enclosing mode-700 directory provides the required confidentiality.
+    
     case "$(stat -c '%U:%G:%a' "$TOKEN")" in
         postfix:postfix:600|postfix:postfix:640|postfix:postfix:644) ;;
         *) die 'The token must be owned by postfix:postfix, readable by its owner and not writable/executable by others.' ;;
@@ -458,7 +455,7 @@ import_main() {
     prepare_candidate "$INPUT"
     TX=restart
     systemctl stop postfix
-    # Copy only after stop: the running plugin may have rotated the refresh token.
+    
     cp "$TOKEN" "$STATE/previous-token.json"; chmod 600 "$STATE/previous-token.json"
     cp "$CONFIG" "$STATE/previous-config.json"; chmod 600 "$STATE/previous-config.json"
     cp "$STATE/managed.sha256" "$STATE/previous.sha256"
@@ -514,8 +511,7 @@ test_main() {
     local reply qid start deadline log accepted=0 log_identity='' log_offset=0
     if [[ -f $MAILLOG ]]; then log_identity=$(stat -c '%d:%i' "$MAILLOG"); log_offset=$(stat -c %s "$MAILLOG"); fi
     start=$(date +%s)
-    # These positional parameters deliberately expand in the bounded child shell.
-    # shellcheck disable=SC2016
+    
     if ! reply=$(timeout 25 bash -c 'source "$1"; smtp_submit "$2" "$3" "$4"' _ "$SELF" "$mailbox" "$RECIPIENT" "smtp-oauth-cli-$start-$$" 2>"$WORK/smtp.log"); then
         die 'Local SMTP submission failed. Inspect Postfix service/listener logs; no relay acceptance was confirmed.'
     fi
@@ -584,8 +580,6 @@ init_main() {
     chmod 600 "$OUTPUT"; say "Protected configuration created: $OUTPUT"
 }
 authorize_main() (
-# Initial public-client authorization, isolated from deployment state and traps.
-# Protocol: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code
 set +x
 set -Eeuo pipefail
 umask 077
@@ -744,7 +738,6 @@ jq -nj --arg client "$CLIENT_ID" --slurpfile device "$WORK/device.json" \
      "&device_code=" + ($device[0].device_code|@uri)' >"$WORK/token.form"
 authorized=0
 while (( $(date +%s) < deadline )); do
-    # Honour the server interval; split long waits to keep signal handling responsive.
     remaining=$interval
     while (( remaining > 0 )); do
         pause=$remaining; (( pause <= 30 )) || pause=30
@@ -774,7 +767,7 @@ jq --arg provider "$PROVIDER" --arg mailbox "$MAILBOX" --arg client "$CLIENT_ID"
     '{provider:$provider,mailbox:$mailbox,client_id:$client,client_secret:"",refresh_token:.refresh_token} +
      (if $provider == "m365" then {tenant:$tenant} else {} end)' "$WORK/token.json" >"$WORK/client.json"
 chmod 600 "$WORK/client.json"
-# Same filesystem, atomic publication, and no replacement of an existing file.
+
 ln -T -- "$WORK/client.json" "$OUTPUT" || die 'Could not publish the new output file. Existing files were preserved.'
 say "Created protected configuration: $OUTPUT"
 if ! jq -e '.refresh_token | test("[&+%]") | not' "$OUTPUT" >/dev/null; then
