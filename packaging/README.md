@@ -11,7 +11,7 @@ Enable your organization's approved repositories providing jsoncpp-devel and the
 other build dependencies. As root on the builder:
 
 ```bash
-dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build curl patch
+dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build /usr/bin/curl patch
 bash packaging/build-rpm.sh /root/smtp-rpm-build
 ```
 
@@ -36,6 +36,7 @@ Shared SASL token/request/response trace logging is redacted for both modes.
 Local tests: `bash tests/run.sh /absolute/path/to/pinned-source-archive.tar.gz` requires
 cmake, C++17, pkg-config, curl/jsoncpp/Cyrus development packages, jq and ShellCheck.
 Deployment tests run as root in an isolated container and mock host commands.
-CI builds/testing do not deploy or send mail. EL8 build verification was blocked in
-the managed workspace by proxy denial of mirrors.almalinux.org; live EL/SELinux/
-Microsoft acceptance remains a release gate, not a claimed certification.
+CI builds/testing do not deploy or send mail. The managed workspace cannot fetch
+mirrors.almalinux.org, so the EL build matrix runs on GitHub-hosted runners. Check
+the exact commit’s Actions results; container build success does not establish
+live EL/SELinux/Microsoft acceptance, which remains a release gate.

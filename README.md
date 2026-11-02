@@ -7,7 +7,7 @@ user refresh token or token daemon. It is not yet the selected NHSmail solution.
 A delegated workflow can also run on a headless Linux server when authorization
 occurs on a separate workstation; selecting that route requires provider and user
 confirmation. The original 2.1.0 workflow remains in Git at commit
-`4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`; these changes are isolated on a local branch.
+`4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`; this published workflow remains a QA candidate until live acceptance passes.
 The client’s administrator must authorize the application for one sending mailbox.
 This release supports a **client secret**; certificate credentials, personal
 Outlook.com and Gmail are outside this workflow.
@@ -32,7 +32,7 @@ All following commands run as **root**, from the approved repository directory.
 Install OS prerequisites from your approved repositories:
 
 ```bash
-dnf install -y postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq curl ca-certificates util-linux iproute policycoreutils policycoreutils-python-utils
+dnf install -y postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq /usr/bin/curl ca-certificates util-linux iproute policycoreutils policycoreutils-python-utils
 ```
 
 On an existing delegated installation, first pause submissions, drain its queue and
