@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2016
+# AND/OR guards intentionally fail closed; bash -c expands positional arguments in the child.
 set +x
 
-VERSION=2.1.0
+VERSION=3.0.0
 STATE=/var/lib/smtp-oauth-cli
 TOKENDIR=/var/spool/postfix/smtp-oauth-cli
 TOKEN=$TOKENDIR/token.json
@@ -42,103 +44,40 @@ protected_file() {
     (( $(stat -c %s -- "$path") <= 262144 )) || die 'Configuration is unexpectedly large.'
 }
 validate_config() {
-    local placeholders
     protected_file "$1"
-    jq empty "$1" >/dev/null 2>&1 || die 'Cannot parse credential JSON. Save the file as UTF-8, use straight double quotes and remove trailing commas. Do not save as UTF-16.'
     jq -e '
       type == "object" and
-      ((keys - ["provider","mailbox","client_id","client_secret","refresh_token","tenant"]) | length == 0) and
-      ([.provider,.mailbox,.client_id,.refresh_token] | all(type == "string" and length > 0)) and
-      ((has("client_secret") | not) or (.client_secret | type == "string")) and
-      ((has("tenant") | not) or (.tenant | type == "string")) and
-      ([.provider,.mailbox,.client_id,(.client_secret // ""),.refresh_token,(.tenant // "")] |
-        all(test("[\u0000-\u0020\u007f]") | not)) and
-      (.client_id | length <= 4096) and ((.client_secret // "") | length <= 8192) and
-      (.refresh_token | length <= 65536) and
-      ([.client_id,(.client_secret // ""),.refresh_token] | all(test("[&+%]") | not))
-    ' "$1" >/dev/null 2>&1 || die 'Invalid credential JSON: check required strings, allowed fields, whitespace and lengths. This sasl-xoauth2 workflow cannot accept &, + or % in OAuth credentials; never edit issued credentials.'
-    placeholders=$(jq -r '[to_entries[] | select(.value | type == "string") |
-      select(.value | test("^(REPLACE_WITH_[A-Z0-9_]+|YOUR_[A-Z0-9_]+)$")) | .key] | join(", ")' "$1")
-    [[ -z $placeholders ]] || die "Unfilled template fields: $placeholders. Replace every placeholder with the actual approved value before continuing."
-    provider=$(jq -r .provider "$1")
-    mailbox=$(jq -r .mailbox "$1")
-    tenant=$(jq -r '.tenant // ""' "$1")
-    mailbox_ok "$mailbox" || die 'Use a plain ASCII mailbox address (letters, numbers, dot, underscore, plus or hyphen).'
-    case "$provider" in
-        outlook)
-            [[ -z $tenant ]] || die 'Use outlook without a tenant for a personal Microsoft account.'
-            relay=smtp-mail.outlook.com; endpoint=https://login.microsoftonline.com/consumers/oauth2/v2.0/token ;;
-        m365)
-            [[ $tenant =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || die 'm365 requires the actual tenant GUID.'
-            relay=smtp.office365.com; endpoint=https://login.microsoftonline.com/$tenant/oauth2/v2.0/token ;;
-        *) die 'Provider must be outlook or m365.' ;;
-    esac
+      ((keys - ["provider","mailbox","client_id","client_secret","tenant"]) | length == 0) and
+      .provider == "m365" and
+      ([.mailbox,.client_id,.client_secret,.tenant] | all(type == "string" and length > 0)) and
+      ([.mailbox,.client_id,.tenant] | all(test("[\u0000-\u0020\u007f]") | not)) and
+      (.client_secret | length <= 8192 and (test("[\u0000-\u001f\u007f]") | not)) and
+      ([.client_id,.tenant] | all(test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"))) and
+      ([.[]] | all(startswith("REPLACE_WITH_") | not))
+    ' "$1" >/dev/null 2>&1 || die 'Invalid Microsoft 365 application JSON. Fill the template; use tenant/application GUIDs and the client secret value. Refresh tokens are not supported.'
+    provider=m365; relay=smtp.office365.com
+    mailbox=$(jq -r .mailbox "$1"); tenant=$(jq -r .tenant "$1")
+    mailbox_ok "$mailbox" || die 'Use a plain ASCII mailbox address.'
+    endpoint=https://login.microsoftonline.com/$tenant/oauth2/v2.0/token
 }
 workdir() {
     [[ -n $WORK ]] && return 0
     WORK=$(mktemp -d /var/tmp/smtp-oauth-cli.XXXXXXXX)
     chmod 700 "$WORK"
 }
-helper_refresh() {
-    local token=$1 config=$2 http error_class error_codes target
-    say 'Validating XOAUTH2 configuration, then the OAuth refresh exchange...'
-    if ! timeout 90 runuser -u postfix -- "$CONFIG_TEST" --config "$config" >"$WORK/helper.log" 2>&1; then
-        die 'XOAUTH2 configuration validation failed. Check the installed helper and protected configuration; raw helper output is withheld.'
-    fi
-    
-    jq -nj --slurpfile config "$config" --slurpfile token "$token" '
-      $config[0] as $c | $token[0] as $t |
-      (["grant_type=refresh_token", "client_id="+($c.client_id|@uri), "refresh_token="+($t.refresh_token|@uri)] +
-       (if $c.client_secret == "" then [] else ["client_secret="+($c.client_secret|@uri)] end)) | join("&")
-    ' >"$WORK/form"
-    target=$(jq -r .token_endpoint "$config")
-    if ! http=$(curl --disable --silent --show-error --proto '=https' --tlsv1.2 --cacert "$CA" \
-      --connect-timeout 10 --max-time 60 --max-filesize 262144 --request POST \
-      --header 'Content-Type: application/x-www-form-urlencoded' --data-binary "@$WORK/form" \
-      --output "$WORK/response.json" --write-out '%{http_code}' "$target" 2>"$WORK/curl.log"); then
-        die 'OAuth HTTPS request failed. Check clock, CA trust, DNS and HTTPS access; raw output is withheld.'
-    fi
-    if [[ $http != 200 ]]; then
-        error_class=$(jq -r '.error // "request_failed"' "$WORK/response.json" 2>/dev/null || :)
-        case "$error_class" in invalid_grant|invalid_client|unauthorized_client|invalid_scope|interaction_required|consent_required|temporarily_unavailable|invalid_request|access_denied) ;; *) error_class=request_failed ;; esac
-        error_codes=$(jq -r 'if (.error_codes? | type) == "array" then
-          [.error_codes[] | select(type == "number") |
-           select(. > 0 and . < 10000000000 and . == floor) | "AADSTS" + tostring] |
-          unique | .[:5] | join(", ") else "" end' "$WORK/response.json" 2>/dev/null || :)
-        [[ -z $error_codes ]] || error_class+="; $error_codes"
-        die "OAuth refresh failed (HTTP $http; $error_class). Check client credentials, grant consent and provider policy."
-    fi
-    jq -e '
-      type == "object" and (.access_token | type == "string" and length > 0 and length <= 65536 and
-        (test("[\u0000-\u0020\u007f]") | not)) and
-      ((.token_type | ascii_downcase) == "bearer") and
-      ((.expires_in | tonumber) as $expiry | $expiry > 0 and $expiry == ($expiry | floor)) and
-      ((has("refresh_token") | not) or (.refresh_token | type == "string" and length > 0 and length <= 65536 and
-        (test("[\u0000-\u0020\u007f]") | not)))
-    ' "$WORK/response.json" >/dev/null 2>&1 || die 'The provider did not return a complete usable token response; no candidate was activated.'
-    jq -n --slurpfile old "$token" --slurpfile response "$WORK/response.json" --argjson now "$(date +%s)" '
-      $response[0] as $r | {access_token:$r.access_token,refresh_token:($r.refresh_token // $old[0].refresh_token),
-      expiry:(($now + ($r.expires_in | tonumber)) | floor | tostring)}
-    ' >"$WORK/refreshed.json" 2>/dev/null || die 'Unable to create the protected candidate token.'
-    jq -e --argjson now "$(date +%s)" '
-      (.expiry | tonumber) as $expiry | ($expiry == ($expiry | floor) and $expiry > $now) and
-      (.refresh_token | test("[&+%]") | not)
-    ' "$WORK/refreshed.json" >/dev/null 2>&1 || die 'The refreshed token has invalid expiry or an unsupported rotated refresh token. Never edit the issued token.'
-    install -m 600 -o postfix -g postfix "$WORK/refreshed.json" "$token"
-    say 'Refresh exchange passed. SMTP delivery is verified separately with test.'
-}
 prepare_candidate() {
     workdir
     chgrp postfix "$WORK"; chmod 710 "$WORK"
     mkdir "$WORK/runtime"; chown postfix:postfix "$WORK/runtime"; chmod 700 "$WORK/runtime"
-    jq --arg endpoint "$endpoint" --arg ca "$CA" '{client_id,client_secret:(.client_secret // ""),token_endpoint:$endpoint,
+    jq --arg endpoint "$endpoint" --arg ca "$CA" '{client_id,client_secret,grant_type:"client_credentials",token_endpoint:$endpoint,
       ca_bundle_file:$ca,always_log_to_syslog:"no",log_to_syslog_on_failure:"no",log_full_trace_on_failure:"no"}' "$1" >"$WORK/config.json"
     chmod 640 "$WORK/config.json"; chown root:postfix "$WORK/config.json"
-    jq '{refresh_token}' "$1" >"$WORK/runtime/token.json"
+    printf '{}\n' >"$WORK/runtime/token.json"
     chmod 600 "$WORK/runtime/token.json"; chown postfix:postfix "$WORK/runtime/token.json"
-    helper_refresh "$WORK/runtime/token.json" "$WORK/config.json"
-    jq --slurpfile token "$WORK/runtime/token.json" '.refresh_token=$token[0].refresh_token' "$1" >"$WORK/recovery.json"
-    chmod 600 "$WORK/recovery.json"
+    if ! timeout 90 runuser -u postfix -- "$CONFIG_TEST" --config "$WORK/config.json" --token "$WORK/runtime/token.json" >"$WORK/helper.log" 2>&1; then
+        die 'Application token request failed. Check the approved credential, expiry, tenant, CA trust and HTTPS access. No candidate was activated; raw output is withheld.'
+    fi
+    say 'Application token request passed. Postfix acquires and caches tokens on demand; test verifies SMTP authorization separately.'
 }
 prerequisites() {
     local command version rhel
@@ -147,18 +86,21 @@ prerequisites() {
     done
     rhel=$(rpm -E '%{rhel}')
     [[ $rhel == 8 || $rhel == 9 || $rhel == 10 ]] || die 'This release targets Enterprise Linux 8, 9 and 10 only; qualify the actual host with the supplied lab.'
-    version=$(rpm -q --qf '%{VERSION}' sasl-xoauth2 2>/dev/null) || die 'Install the sasl-xoauth2 RPM from an approved repository.'
-    [[ $(printf '%s\n' 0.24 "$version" | sort -V | head -n 1) == 0.24 ]] || die 'sasl-xoauth2 0.24 or newer is required; qualify its helper behavior before use.'
+    version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Install the approved sasl-xoauth2-m365-cli RPM built from packaging/ first.'
+    [[ $version == 0.28-1.smtpcli* ]] || die 'This deployment requires the reviewed 0.28-1.smtpcli package.'
     CONFIG_TEST=$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config
-    [[ -x $CONFIG_TEST ]] || die 'The sasl-xoauth2 RPM compiled configuration checker is missing; repair the package before deployment.'
+    [[ -x $CONFIG_TEST ]] || die 'The packaged configuration checker is missing.'
+    local binary
+    for binary in "$CONFIG_TEST" "$(rpm --eval '%{_libdir}')/sasl2/libsasl-xoauth2.so"; do
+        [[ $(rpm -qf --qf '%{NAME}' "$binary") == sasl-xoauth2-m365-cli ]] || die 'Plugin/helper is not owned by the approved application-auth package.'
+    done
+    rpm -V --nomtime --noconfig sasl-xoauth2-m365-cli >/dev/null 2>&1 || die 'Application-auth package integrity check failed; repair the approved package.'
+    [[ $("$CONFIG_TEST" --application-auth-capability) == smtp-oauth-cli-client-credentials-v1 ]] || die 'The installed helper lacks native application authentication.'
     postconf -A | grep -x cyrus >/dev/null || die 'Postfix was not built with Cyrus SASL client support.'
     PLUGINVIEWER=$(command -v pluginviewer || command -v saslpluginviewer) || die 'Install the Cyrus SASL plugin viewer (pluginviewer on Enterprise Linux).'
     "$PLUGINVIEWER" -c 2>/dev/null | grep -i XOAUTH2 >/dev/null || die 'The Cyrus SASL client cannot discover XOAUTH2. Check the packaged plugin and its default /etc/sasl-xoauth2.conf.'
     [[ $(postconf -h config_directory) == /etc/postfix && $(postconf -h queue_directory) == /var/spool/postfix && $(postconf -h mail_owner) == postfix ]] || die 'This release requires the standard /etc/postfix, /var/spool/postfix and postfix service account.'
     [[ -r $CA ]] || die "Missing CA bundle: $CA"
-    if [[ ! -r /proc/net/if_inet6 ]] || ! grep -q ' lo$' /proc/net/if_inet6; then
-        die 'Enable IPv6 loopback as well as IPv4 before installing this localhost-only listener.'
-    fi
     postconf -F smtp/unix/chroot >/dev/null || die 'The standard smtp/unix transport is missing from master.cf.'
     [[ -z $(postconf -h multi_instance_directories) ]] || die 'Use a dedicated standard Postfix instance; multiple instances require manual integration.'
     for command in transport_maps sender_dependent_relayhost_maps sender_dependent_default_transport_maps; do
@@ -186,8 +128,8 @@ prerequisites() {
 }
 managed_settings() {
     SETTINGS=(
-      [relayhost]="[$relay]:587" [inet_interfaces]=loopback-only [inet_protocols]=all
-      [mynetworks]='127.0.0.0/8 [::1]/128' [smtpd_relay_restrictions]='permit_mynetworks, reject_unauth_destination'
+      [relayhost]="[$relay]:587" [inet_interfaces]=127.0.0.1 [inet_protocols]=ipv4
+      [mynetworks]='127.0.0.1/32' [smtpd_relay_restrictions]='permit_mynetworks, reject_unauth_destination'
       [smtp_tls_security_level]=verify [smtp_tls_CAfile]="$CA" [smtp_tls_wrappermode]=no
       [smtp_tls_verify_cert_match]=hostname [smtp_tls_policy_maps]=''
       [smtp_sasl_auth_enable]=yes [smtp_sasl_type]=cyrus [smtp_sasl_password_maps]="$BACKEND:$MAP"
@@ -201,7 +143,7 @@ load_state() {
     protected_file "$STATE/manifest.json"
     [[ $(stat -c '%u:%a' "$STATE") == 0:700 ]] || die 'The protected state directory must be owned by root with mode 700.'
     
-    jq -e --arg version "$VERSION" '(.version == $version or .version == "2.0.0" or .version == "2.0.1") and (.status == "installed" or .status == "installing" or .status == "removing") and
+    jq -e --arg version "$VERSION" '(.version == $version or .version == "2.1.0" or .version == "2.0.0" or .version == "2.0.1") and (.status == "installed" or .status == "installing" or .status == "removing") and
       (.backend == "hash" or .backend == "lmdb") and (.active | type == "boolean") and
       (.enabled == "enabled" or .enabled == "disabled") and (.chroot == "n" or .chroot == "y" or .chroot == "-")' "$STATE/manifest.json" >/dev/null || die 'Unknown or damaged recovery manifest; use its matching script and retain the backup.'
     provider=$(jq -r .provider "$STATE/manifest.json"); mailbox=$(jq -r .mailbox "$STATE/manifest.json")
@@ -218,10 +160,15 @@ load_state() {
     esac
     mailbox_ok "$mailbox" || die 'Invalid mailbox in recovery manifest.'
     managed_settings
+    if [[ $(jq -r .version "$STATE/manifest.json") != "$VERSION" ]]; then
+        SETTINGS[inet_interfaces]=loopback-only; SETTINGS[inet_protocols]=all
+        SETTINGS[mynetworks]='127.0.0.0/8 [::1]/128'
+    fi
 }
 require_installed() {
-    [[ $provider != google ]] || die 'Gmail support has been removed. Use status or uninstall for this legacy installation, then install Outlook or Microsoft 365.'
+    [[ $(jq -r .version "$STATE/manifest.json") == "$VERSION" ]] || die 'Legacy delegated installation: use status/uninstall to recover it before installing application authentication.'
     [[ $(jq -r .status "$STATE/manifest.json") == installed ]] || die 'Installation is incomplete; use uninstall to restore the protected baseline before retrying.'
+    [[ ! -f $STATE/import.preparing ]] || die 'Interrupted import preparation: run recover-import.'
     [[ ! -f $STATE/import.pending ]] || die 'An interrupted credential import needs recovery from previous-config.json and previous-token.json first.'
 }
 state_status() {
@@ -307,7 +254,9 @@ guard_permissions() {
     [[ $(stat -c '%U:%G:%a' "$TOKENDIR") == postfix:postfix:700 ]] || die 'The runtime directory must be postfix:postfix mode 700.'
     
     case "$(stat -c '%U:%G:%a' "$TOKEN")" in
-        postfix:postfix:600|postfix:postfix:640|postfix:postfix:644) ;;
+        postfix:postfix:600) ;;
+        postfix:postfix:640|postfix:postfix:644)
+            [[ $(jq -r .version "$STATE/manifest.json") != "$VERSION" ]] || die 'Application token cache must have mode 600.' ;;
         *) die 'The token must be owned by postfix:postfix, readable by its owner and not writable/executable by others.' ;;
     esac
 }
@@ -322,6 +271,12 @@ guard_drift() {
     done
     [[ -d $TOKENDIR && ! -L $TOKENDIR ]] || { say 'Drift: token directory'; bad=1; }
     sha256sum -c --status "$STATE/managed.sha256" 2>/dev/null || { say 'Drift: managed configuration/map contents'; bad=1; }
+    local overrides services
+    overrides=$(postconf -P) || die 'Cannot inspect master.cf overrides.'
+    if printf '%s\n' "$overrides" | grep -E '^smtp/(inet|unix)/' >/dev/null; then say 'Drift: smtp service overrides'; bad=1; fi
+    services=$(postconf -M) || die 'Cannot inspect master.cf.'
+    [[ $(printf '%s\n' "$services" | awk '$2=="inet" {print $1,$2,$8,NF}') == 'smtp inet smtpd 8' ]] || { say 'Drift: SMTP listener services'; bad=1; }
+    [[ $(postconf -M smtp/unix | awk '{print $1,$2,$8,NF}') == 'smtp unix smtp 8' ]] || { say 'Drift: SMTP transport'; bad=1; }
     (( bad == 0 )) || die 'Managed configuration drift detected. Restore the recorded managed values or review the recovery files before continuing; no force override is provided.'
     guard_permissions
 }
@@ -331,7 +286,9 @@ verify_listener() {
     while read -r address; do
         case "$address" in '127.0.0.1:25'|'[::1]:25'|'::1:25') ((count+=1)) ;; *) die 'Unexpected SMTP listener. Review master.cf and the local network configuration.' ;; esac
     done < <(printf '%s\n' "$listeners" | awk '{print $4}')
-    (( count == 2 )) || die 'Expected both loopback IPv4 and IPv6 SMTP listeners.'
+    if [[ ${SETTINGS[inet_protocols]} == ipv4 ]]; then
+        (( count == 1 )) && [[ $listeners == *127.0.0.1:25* ]] || die 'Expected only 127.0.0.1:25.'
+    else (( count == 2 )) || die 'Expected legacy IPv4 and IPv6 loopback listeners.'; fi
 }
 activate_files() {
     install -m 640 -o root -g postfix "$WORK/config.json" "$CONFIG.smtp-oauth-new"
@@ -392,8 +349,12 @@ restore_import() {
     install -m 600 -o postfix -g postfix "$STATE/previous-token.json" "$TOKEN" || return 1
     cp "$STATE/previous.sha256" "$STATE/managed.sha256" || return 1
     label_runtime || return 1
+    # Validate the restored state before allowing any queued mail to leave.
+    (guard_drift) || return 1
     postfix check && systemctl start postfix || return 1
-    rm -f "$STATE/import.pending"
+    systemctl is-active --quiet postfix || return 1
+    (verify_listener) || return 1
+    rm -f "$STATE/import.pending" "$STATE/import.preparing"
 }
 cleanup() {
     local rc=$?
@@ -403,19 +364,14 @@ cleanup() {
             prepare) rm -rf -- "$STATE" ;;
             install) if restore_install; then say 'Prior Postfix configuration and service state restored.' >&2; else say "Rollback incomplete. Keep $STATE and use uninstall to resume recovery." >&2; fi ;;
             import) if restore_import; then say 'Previous credentials restored; confirm provider authorization still remains valid.' >&2; else say "Credential recovery incomplete. Keep $STATE and recover previous-config.json / previous-token.json before starting Postfix." >&2; fi ;;
-            restart) systemctl start postfix || say 'Could not restart Postfix after an interrupted credential operation.' >&2 ;;
+            restart) systemctl start postfix && rm -f "$STATE/import.preparing" || say 'Could not restart Postfix after an interrupted credential operation.' >&2 ;;
             force)
                 if ! install -m 600 -o postfix -g postfix "$STATE/test-token.previous" "$TOKEN" || ! label_runtime || ! systemctl start postfix; then
                     say 'Could not recover the forced-expiry test; investigate before sending mail.' >&2
                 fi ;;
         esac
     fi
-    if [[ -n $WORK ]]; then
-        if (( rc != 0 )) && [[ -s $WORK/recovery.json ]]; then
-            chown root:root "$WORK"; chmod 700 "$WORK"
-            say "The provider may have rotated the grant. Latest validated credentials retained at $WORK/recovery.json (root-only); secure or remove this recovery file after resolution." >&2
-        else rm -rf -- "$WORK"; fi
-    fi
+    if [[ -n $WORK ]]; then rm -rf -- "$WORK"; fi
     exit "$rc"
 }
 install_main() {
@@ -453,6 +409,7 @@ import_main() {
     [[ $provider == "$old_provider" && $mailbox == "$old_mailbox" && $tenant == "$old_tenant" ]] || die 'import-token keeps the same provider, mailbox and tenant. Uninstall before switching providers.'
     confirm "Validate and replace credentials for $mailbox?"
     prepare_candidate "$INPUT"
+    : >"$STATE/import.preparing"
     TX=restart
     systemctl stop postfix
     
@@ -463,7 +420,7 @@ import_main() {
     activate_files; label_runtime; postfix check; owned_hashes
     systemctl start postfix; systemctl is-active --quiet postfix || die 'Postfix did not remain active after importing credentials.'
     verify_listener
-    rm "$STATE/import.pending"; TX=
+    rm -f "$STATE/import.pending" "$STATE/import.preparing"; TX=
     say 'Credentials replaced. The protected state directory retains the previous token for recovery. Run test --force-refresh to verify runtime refresh.'
 }
 smtp_reply() {
@@ -504,7 +461,7 @@ test_main() {
         TX=restart
         systemctl stop postfix
         cp "$TOKEN" "$STATE/test-token.previous"; chmod 600 "$STATE/test-token.previous"; TX=force
-        jq '.expiry="0"' "$TOKEN" >"$WORK/expired.json"
+        jq 'del(.access_token,.expiry)' "$TOKEN" >"$WORK/expired.json"
         install -m 600 -o postfix -g postfix "$WORK/expired.json" "$TOKEN"
         label_runtime; systemctl start postfix; systemctl is-active --quiet postfix || die 'Postfix failed to start for the forced-refresh test.'; TX=
     fi
@@ -528,8 +485,7 @@ test_main() {
         sleep 2
     done
     if (( FORCE_REFRESH )); then
-        jq -e --argjson now "$(date +%s)" '(.expiry | tonumber) > $now and (.access_token | type == "string" and length > 0) and
-          (.refresh_token | type == "string" and length > 0 and (test("[&+%\u0000-\u0020\u007f]") | not))' "$TOKEN" >/dev/null 2>&1 || die "Postfix did not leave a usable refreshed token. Keep queue ID $qid for investigation; never edit issued credentials."
+        jq -e --argjson now "$(date +%s)" '(.expiry | tonumber) > $now and (.access_token | type == "string" and length > 0)' "$TOKEN" >/dev/null 2>&1 || die "Postfix did not leave a usable refreshed token. Keep queue ID $qid for investigation; never edit issued credentials."
         say 'Postfix token-file update after forced-expiry test: observed'
         rm -f "$STATE/test-token.previous"
     fi
@@ -541,259 +497,62 @@ status_main() {
     say "Deployment $VERSION | $(jq -r .status "$STATE/manifest.json") | $provider | $mailbox | $relay:587"
     say "Postfix: $(systemctl is-active postfix 2>/dev/null || :) | enabled: $(systemctl is-enabled postfix 2>/dev/null || :)"
     local expiry
-    expiry=$(jq -er '.expiry | tonumber | floor' "$TOKEN" 2>/dev/null) || die 'Token expiry is unavailable; inspect recovery state.'
-    say "Access-token expiry (UTC): $(date -u -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"
+    expiry=$(jq -er '(.expiry // 0) | tonumber | floor' "$TOKEN" 2>/dev/null) || die 'Token expiry is unavailable; inspect recovery state.'
+    if (( expiry == 0 )); then say 'Access-token cache empty; acquisition occurs on next SMTP authentication.'
+    else say "Access-token expiry (UTC): $(date -u -d "@$expiry" '+%Y-%m-%d %H:%M:%S')"; fi
     say 'The plugin refreshes on SMTP authentication. An expiry timestamp alone does not prove refresh.'
+    [[ ! -f $STATE/import.preparing ]] || die 'Interrupted import: run recover-import.'
     [[ ! -f $STATE/import.pending ]] || die 'Interrupted credential import: retain previous-config.json and previous-token.json for recovery.'
-    guard_drift; say 'Managed configuration drift: none. Listener configuration: loopback IPv4 and IPv6.'
-    if systemctl is-active --quiet postfix; then verify_listener; fi
+    guard_drift; say 'Managed configuration drift: none.'
+    systemctl is-active --quiet postfix || die 'Postfix is inactive.'
+    verify_listener
 }
 uninstall_main() {
     load_state
+    [[ ! -f $STATE/import.pending && ! -f $STATE/import.preparing ]] || die 'Run recover-import before uninstall.'
     if [[ $(jq -r .status "$STATE/manifest.json") == installed ]]; then guard_drift; fi
     confirm 'Restore prior Postfix settings/service and remove this installation, including protected backups?'
+    local was_active=0
+    systemctl is-active --quiet postfix && was_active=1
+    systemctl stop postfix
+    if ! postqueue -p | grep -x 'Mail queue is empty' >/dev/null; then
+        if (( was_active )); then systemctl start postfix; fi
+        die 'Queue is not empty or cannot be read. Drain it with the current relay before uninstall; no settings were restored.'
+    fi
     state_status removing
     restore_install || die "Restore incomplete. Keep $STATE and rerun uninstall after correcting the reported problem."
     say 'Removed. Prior settings/service restored. Queue, packages and provider-side consent were preserved.'
 }
-init_main() {
-    local parent mode secret client rt
-    [[ $PROVIDER == outlook || $PROVIDER == m365 ]] || die 'Provider must be outlook or m365.'
-    [[ -t 0 ]] || die 'init requires a terminal for hidden secret entry; alternatively create the documented protected JSON file.'
-    [[ -n $PROVIDER && -n $MAILBOX && -n $OUTPUT ]] || die 'init requires --provider, --mailbox and --output.'
-    exists "$OUTPUT" && die '--output must name a new file.'
-    parent=$(dirname -- "$(realpath -ms -- "$OUTPUT")")
-    [[ -d $parent && $(realpath -e -- "$parent") == "$parent" && $(stat -c %u "$parent") == 0 ]] || die 'Choose an existing root-owned output directory without symlinks.'
-    mode=$(stat -c %a "$parent"); (( (8#$mode & 0022) == 0 )) || die 'The output directory must not be writable by group/others.'
-    read -r -p 'Client ID: ' client
-    read -r -s -p 'Client secret (Enter for a Microsoft public client): ' secret; printf '\n'
-    read -r -s -p 'Refresh token: ' rt; printf '\n'
-    workdir
-    printf '%s' "$client" >"$WORK/client"; printf '%s' "$secret" >"$WORK/secret"; printf '%s' "$rt" >"$WORK/refresh"
-    unset secret rt client
-    jq -n --arg provider "$PROVIDER" --arg mailbox "$MAILBOX" --arg tenant "$TENANT" \
-      --rawfile client_id "$WORK/client" --rawfile client_secret "$WORK/secret" --rawfile refresh_token "$WORK/refresh" \
-      '{provider:$provider,mailbox:$mailbox,client_id:$client_id,client_secret:$client_secret,refresh_token:$refresh_token} +
-        (if $tenant == "" then {} else {tenant:$tenant} end)' >"$WORK/input.json"
-    validate_config "$WORK/input.json"
-    (set -o noclobber; cat "$WORK/input.json" >"$OUTPUT") || die 'Could not create new output file.'
-    chmod 600 "$OUTPUT"; say "Protected configuration created: $OUTPUT"
-}
-authorize_main() (
-set +x
-set -Eeuo pipefail
-umask 077
-export LC_ALL=C
-
-VERSION=2.1.0
-WORK=''
-PROVIDER=''
-CLIENT_ID=''
-MAILBOX=''
-TENANT=''
-OUTPUT=''
-HTTP=''
-EMAIL_RX='^[A-Za-z0-9._+-]+@[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
-GUID_RX='^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'
-
-say() { printf '%s\n' "$*"; }
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-cleanup() { [[ -z $WORK ]] || rm -rf -- "$WORK"; }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-usage() {
-    cat <<'HELP'
-Microsoft public-client authorization 2.1.0 (Bash, curl and jq).
-
-  bash smtp-oauth-deploy.sh authorize --provider outlook --output /root/smtp-oauth-microsoft/client.json
-  bash smtp-oauth-deploy.sh authorize --provider m365 --output /root/smtp-oauth-microsoft/client.json
-
-Prompts for the application client ID, sending mailbox and (m365) tenant GUID.
-Optional flags: --client-id GUID --mailbox EMAIL --tenant GUID
-The output must be a NEW file in an existing root-owned private directory.
-
-Register a public-client app first using README.txt.
-Run authorize in the Linux terminal. Open the displayed Microsoft URL
-on your own PC and sign in as the sending mailbox. The Linux host needs no GUI.
-This one-time sign-in creates a delegated refresh grant; it does not bypass MFA.
-No client secret is used in this lab flow. No Postfix configuration is changed.
-Existing client-supplied JSON files do not need authorize.
-HELP
-}
-
-prompt_value() {
-    local name=$1 label=$2
-    [[ -n ${!name} ]] && return 0
-    [[ -t 0 ]] || die "Supply $label with its command option, or run in a terminal."
-    read -r -p "$label: " "$name" || die 'Input cancelled.'
-}
-
-post_form() {
-    local endpoint=$1 form=$2 response=$3
-    if ! HTTP=$(curl --disable --silent --show-error --proto '=https' --tlsv1.2 \
-        --connect-timeout 10 --max-time 30 --max-filesize 262144 \
-        --request POST --header 'Content-Type: application/x-www-form-urlencoded' \
-        --data-binary "@$form" --output "$response" --write-out '%{http_code}' \
-        "$endpoint" 2>"$WORK/curl-error.txt"); then
-        die 'Microsoft HTTPS request failed. Check DNS, time, CA trust and outbound TCP 443. No credentials were printed.'
+recover_main() {
+    load_state
+    if [[ ! -f $STATE/import.pending && -f $STATE/import.preparing ]]; then
+        guard_drift
+        postfix check; systemctl start postfix; verify_listener
+        rm "$STATE/import.preparing"
+        say 'Interrupted preparation recovered; active credentials were unchanged.'
+        return
     fi
-    jq -e 'type == "object"' "$response" >/dev/null 2>&1 || \
-        die "Microsoft returned a non-JSON response (HTTP $HTTP). Check the proxy or service availability."
+    [[ -f $STATE/import.pending ]] || die 'No interrupted import is recorded.'
+    protected_file "$STATE/previous-config.json"
+    protected_file "$STATE/previous-token.json"
+    protected_file "$STATE/previous.sha256"
+    confirm 'Restore credentials saved before the interrupted import and start Postfix?'
+    restore_import || die 'Credential recovery incomplete; retain the state directory.'
+    guard_drift; verify_listener
+    say 'Previous credentials restored. Run status and test.'
 }
-
-provider_error() {
-    local response=$1 error codes
-    error=$(jq -r '.error // "request_failed"' "$response")
-    case "$error" in
-        invalid_client|unauthorized_client|invalid_scope|invalid_request|invalid_grant|access_denied|authorization_declined|expired_token|bad_verification_code|interaction_required|consent_required|temporarily_unavailable) ;;
-        *) error=request_failed ;;
-    esac
-    codes=$(jq -r 'if (.error_codes | type) == "array" then
-        [.error_codes[] | select(type == "number" and . > 0 and . < 1000000000 and . == floor) |
-         "AADSTS" + tostring] | unique | .[:5] | join(", ") else "" end' "$response")
-    say "Microsoft authorization failed (HTTP $HTTP; $error${codes:+; $codes})." >&2
-    case "$error" in
-        authorization_declined|access_denied) say 'Consent was declined or policy blocked sign-in. Ask the tenant administrator to inspect the sign-in result.' >&2 ;;
-        expired_token|bad_verification_code) say 'Run authorize again for a fresh device code; complete the browser steps while the terminal remains open.' >&2 ;;
-        invalid_client|unauthorized_client) say 'Check the application client ID, supported account type, tenant and Allow public client flows = Yes. Authorize uses no client secret.' >&2 ;;
-        invalid_scope|consent_required) say 'Check delegated SMTP.Send and consent for the registered application; Graph Mail.Send is a different permission.' >&2 ;;
-        *) say 'Use the displayed error code and README.txt. Raw responses are withheld because they can contain credentials.' >&2 ;;
-    esac
-    exit 1
-}
-
-while (( $# )); do
-    flag=$1; shift
-    case "$flag" in
-        --help|-h) usage; exit 0 ;;
-        --version) say "$VERSION"; exit 0 ;;
-        --provider|--output|--client-id|--mailbox|--tenant)
-            (( $# )) && [[ $1 != --* ]] || die "Missing value for $flag."
-            case "$flag" in
-                --provider) PROVIDER=$1 ;; --output) OUTPUT=$1 ;; --client-id) CLIENT_ID=$1 ;;
-                --mailbox) MAILBOX=$1 ;; --tenant) TENANT=$1 ;;
-            esac
-            shift ;;
-        *) die "Unknown option: $flag. Use --help." ;;
-    esac
-done
-
-(( EUID == 0 )) || die 'Run as root on the Linux host.'
-for prerequisite in curl jq realpath stat mktemp ln date sleep; do
-    command -v "$prerequisite" >/dev/null || die "Missing $prerequisite. Complete README.txt first."
-done
-[[ $PROVIDER == outlook || $PROVIDER == m365 ]] || die '--provider must be outlook or m365.'
-[[ $OUTPUT == /* ]] || die '--output must be an absolute path to a new JSON file.'
-[[ ! -e $OUTPUT && ! -L $OUTPUT ]] || die 'Output already exists. Keep it and use a new name, such as replacement.json.'
-parent=$(dirname -- "$OUTPUT")
-[[ -d $parent && $(realpath -ms -- "$parent") == "$(realpath -e -- "$parent")" ]] || \
-    die 'Use an existing output directory without symlinks.'
-mode=$(stat -c %a -- "$parent")
-[[ $(stat -c %u -- "$parent") == 0 ]] && (( (8#$mode & 0077) == 0 )) || \
-    die 'Output directory must be root-owned with mode 700. Use /root/smtp-oauth-microsoft after README.txt preparation.'
-
-prompt_value CLIENT_ID 'Application (client) ID'
-prompt_value MAILBOX 'Exact sending mailbox address'
-[[ $CLIENT_ID =~ $GUID_RX ]] || die 'Client ID must be the application GUID from App registrations > Overview.'
-[[ ${#MAILBOX} -le 254 && $MAILBOX =~ $EMAIL_RX && $MAILBOX != *..* ]] || die 'Enter a plain email address without spaces.'
-if [[ $PROVIDER == m365 ]]; then
-    prompt_value TENANT 'Directory (tenant) ID'
-    [[ $TENANT =~ $GUID_RX ]] || die 'Use the tenant GUID, not the client ID, subscription ID or domain.'
-    authority=$TENANT
-else
-    [[ -z $TENANT ]] || die 'Personal Outlook uses consumers; omit --tenant.'
-    authority=consumers
-fi
-
-WORK=$(mktemp -d "$parent/.smtp-oauth-authorize.XXXXXXXX")
-endpoint="https://login.microsoftonline.com/$authority/oauth2/v2.0"
-jq -nj --arg client "$CLIENT_ID" --arg scope 'offline_access https://outlook.office.com/SMTP.Send' \
-    '"client_id=" + ($client|@uri) + "&scope=" + ($scope|@uri)' >"$WORK/device.form"
-started=$(date +%s)
-post_form "$endpoint/devicecode" "$WORK/device.form" "$WORK/device.json"
-[[ $HTTP == 200 ]] || provider_error "$WORK/device.json"
-jq -e '
-    (.device_code | type == "string" and length > 0 and length <= 65536) and
-    (.user_code | type == "string" and test("^[A-Za-z0-9-]{4,40}$")) and
-    (.verification_uri | type == "string" and test("^https://(www\\.)?microsoft\\.com/(devicelogin|link)/?$")) and
-    (.expires_in | type == "number" and . > 0 and . <= 86400 and . == floor) and
-    ((.interval // 5) | type == "number" and . > 0 and . <= 60 and . == floor)
-' "$WORK/device.json" >/dev/null 2>&1 || die 'Microsoft returned an unexpected device-code response. No grant was saved.'
-
-interval=$(jq -r '.interval // 5' "$WORK/device.json")
-deadline=$((started + $(jq -r '.expires_in' "$WORK/device.json")))
-say ''
-say 'Leave this terminal open. On your own PC, open:'
-jq -r .verification_uri "$WORK/device.json"
-say "Enter this one-time code: $(jq -r .user_code "$WORK/device.json")"
-say "Sign in as: $MAILBOX"
-say 'Complete consent and MFA. Use another account if the browser selects the wrong mailbox.'
-say "Waiting for Microsoft authorization (up to $(jq -r .expires_in "$WORK/device.json") seconds)."
-say 'Do not send this device code to anyone else.'
-
-jq -nj --arg client "$CLIENT_ID" --slurpfile device "$WORK/device.json" \
-    '"grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&client_id=" + ($client|@uri) +
-     "&device_code=" + ($device[0].device_code|@uri)' >"$WORK/token.form"
-authorized=0
-while (( $(date +%s) < deadline )); do
-    remaining=$interval
-    while (( remaining > 0 )); do
-        pause=$remaining; (( pause <= 30 )) || pause=30
-        sleep "$pause"
-        remaining=$((remaining - pause))
-    done
-    (( $(date +%s) < deadline )) || break
-    post_form "$endpoint/token" "$WORK/token.form" "$WORK/token.json"
-    if [[ $HTTP == 200 ]]; then authorized=1; break; fi
-    case "$(jq -r '.error // ""' "$WORK/token.json")" in
-        authorization_pending) ;;
-        slow_down) interval=$((interval + 5)) ;;
-        *) provider_error "$WORK/token.json" ;;
-    esac
-done
-(( authorized )) || die 'Device code expired. Run authorize again and finish sign-in before the new code expires.'
-jq -e '
-    (.token_type | type == "string" and ascii_downcase == "bearer") and
-    (.access_token | type == "string" and length > 0) and
-    (.refresh_token | type == "string" and length > 0 and length <= 65536 and
-     (test("[\u0000-\u0020\u007f]") | not)) and
-    ((has("scope") | not) or (.scope | type == "string" and (split(" ") | any(. == "SMTP.Send" or
-      . == "https://outlook.office.com/SMTP.Send" or . == "https://outlook.office365.com/SMTP.Send"))))
-' "$WORK/token.json" >/dev/null 2>&1 || die 'Authorization did not return a usable SMTP refresh grant. Check SMTP.Send and offline_access; no output file was created.'
-
-jq --arg provider "$PROVIDER" --arg mailbox "$MAILBOX" --arg client "$CLIENT_ID" --arg tenant "$TENANT" \
-    '{provider:$provider,mailbox:$mailbox,client_id:$client,client_secret:"",refresh_token:.refresh_token} +
-     (if $provider == "m365" then {tenant:$tenant} else {} end)' "$WORK/token.json" >"$WORK/client.json"
-chmod 600 "$WORK/client.json"
-
-ln -T -- "$WORK/client.json" "$OUTPUT" || die 'Could not publish the new output file. Existing files were preserved.'
-say "Created protected configuration: $OUTPUT"
-if ! jq -e '.refresh_token | test("[&+%]") | not' "$OUTPUT" >/dev/null; then
-    say 'The grant is saved, but its characters are incompatible with the reviewed sasl-xoauth2 build.'
-    say 'Stop before installing. See README.txt; never edit an issued token.'
-    exit 1
-fi
-say 'Next: run bash smtp-oauth-deploy.sh check --config with this file, then follow README.txt.'
-say 'Authorization is complete. Run the SMTP tests in README.txt to verify delivery and automatic refresh.'
-
-)
 usage() {
     cat <<'HELP'
-SMTP OAuth CLI 2.1.0 — Outlook / Microsoft 365; one delegated mailbox.
-  authorize --provider outlook|m365 --output NEW_JSON
-  init --provider outlook|m365 --mailbox EMAIL [--tenant GUID] --output NEW_JSON
+SMTP OAuth CLI 3.0.0 — Microsoft 365 application authentication.
   check [--config JSON]
   install --config JSON [--yes]
   status
   test --recipient EMAIL [--force-refresh] [--yes]
   import-token --config JSON [--yes]
+  recover-import [--yes]
   uninstall [--yes]
-Run as root using Bash 4.4+. Secrets are read from a root-owned private JSON file.
-Already have a client-supplied JSON? Go straight to check and install.
-For initial authorization, authorize displays a code to approve on your own PC.
-The Linux host needs no browser. See README.txt for the complete setup.
+Run as root using Bash 4.4+. Fill the protected client template; see README.md.
+No mailbox sign-in, browser, device code or refresh token is used.
 HELP
 }
 main() {
@@ -804,27 +563,22 @@ main() {
     [[ $cmd != --version ]] || { say "$VERSION"; return; }
     case "$cmd" in help|--help|-h) usage; return ;; esac
     (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || die 'Bash 4.4 or newer is required.'
-    if [[ $cmd == authorize ]]; then
-        shift
-        authorize_main "$@"
-        return
-    fi
     (( EUID == 0 )) || die 'Run as root.'
     shift
-    INPUT='' PROVIDER='' MAILBOX='' TENANT='' OUTPUT='' RECIPIENT='' FORCE_REFRESH=0
+    INPUT='' RECIPIENT='' FORCE_REFRESH=0
     while (( $# )); do
         flag=$1; shift
         case "$cmd:$flag" in
-            init:--provider|init:--mailbox|init:--tenant|init:--output|check:--config|install:--config|import-token:--config|test:--recipient)
+            check:--config|install:--config|import-token:--config|test:--recipient)
                 (( $# )) && [[ $1 != --* ]] || die "Missing value for $flag."
-                case "$flag" in --provider) PROVIDER=$1 ;; --mailbox) MAILBOX=$1 ;; --tenant) TENANT=$1 ;; --output) OUTPUT=$1 ;; --config) INPUT=$1 ;; --recipient) RECIPIENT=$1 ;; esac
+                case "$flag" in --config) INPUT=$1 ;; --recipient) RECIPIENT=$1 ;; esac
                 shift ;;
-            install:--yes|import-token:--yes|test:--yes|uninstall:--yes) YES=1 ;;
+            install:--yes|import-token:--yes|test:--yes|uninstall:--yes|recover-import:--yes) YES=1 ;;
             test:--force-refresh) FORCE_REFRESH=1 ;;
             *) die "Unsupported option: $flag (use --help)." ;;
         esac
     done
-    case "$cmd" in init|check|install|status|test|import-token|uninstall) ;; *) die 'Unknown command; use --help.' ;; esac
+    case "$cmd" in check|install|status|test|import-token|uninstall|recover-import) ;; *) die 'Unknown command; use --help.' ;; esac
     command -v jq >/dev/null || die 'Install jq before using this script.'
     exists "$LEGACY_STATE" && die 'An older smtp-oauth-deploy installation/recovery path exists. Use its original script to uninstall it first; this release will not overwrite it.'
     [[ ! -L $LOCK ]] || die 'Lock path is a symlink.'
@@ -835,9 +589,9 @@ main() {
     SELF=$(realpath -e -- "${BASH_SOURCE[0]}")
     trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
     case "$cmd" in
-        init) init_main ;;
+        recover-import) recover_main ;;
         check) prerequisites; if [[ -n $INPUT ]]; then validate_config "$INPUT"; say "Credential structure passed for $provider / $mailbox."; fi
-               say 'Local prerequisites passed. install validates the refresh exchange; test verifies relay acceptance.' ;;
+               say 'Local prerequisites passed. install validates the application token request; test verifies relay acceptance.' ;;
         install) [[ -n $INPUT ]] || die '--config is required.'; install_main ;;
         import-token) [[ -n $INPUT ]] || die '--config is required.'; import_main ;;
         status) status_main ;;

@@ -1,0 +1,657 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97263bd..e876e1e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,7 +30,10 @@ option(EnableTests "Enable tests." ON)
+ if(EnableTests)
+   enable_testing()
+ endif()
+-add_subdirectory(docs)
++option(BuildDocumentation "Build manual pages" ON)
++if(BuildDocumentation)
++  add_subdirectory(docs)
++endif()
+ add_subdirectory(scripts)
+ add_subdirectory(src)
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 6e4c827..05ff2c5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -23,6 +23,7 @@ pkg_check_modules(SASL REQUIRED "libsasl2")
+ include_directories(${CMAKE_SOURCE_DIR}/src)
+ 
+ set(SOURCES
++  application_token.cc
+   client.cc
+   client.h
+   config.cc
+@@ -78,3 +79,10 @@ target_link_libraries(${PROJECT_NAME}_test ${PROJECT_NAME})
+ add_test(
+   NAME ${PROJECT_NAME}_test
+   COMMAND ${PROJECT_NAME}_test)
++
++add_executable(application-token-test application_token_test.cc)
++target_link_libraries(application-token-test ${PROJECT_NAME})
++add_test(NAME application-token-test COMMAND application-token-test)
++
++add_test(NAME application-capability COMMAND test-config --application-auth-capability)
++set_tests_properties(application-capability PROPERTIES PASS_REGULAR_EXPRESSION "smtp-oauth-cli-client-credentials-v1")
+diff --git a/src/application_token.cc b/src/application_token.cc
+new file mode 100644
+index 0000000..a6dd88a
+--- /dev/null
++++ b/src/application_token.cc
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: Apache-2.0
++// Native Microsoft 365 client credentials; no delegated grants or token logging.
++#include "application_token.h"
++#include "config.h"
++#include "http.h"
++#include <json/json.h>
++#include <sasl/sasl.h>
++#include <fcntl.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <chrono>
++#include <thread>
++#include <ctime>
++#include <regex>
++#include <memory>
++
++namespace sasl_xoauth2 {
++namespace {
++struct FD {
++  int value;
++  explicit FD(int v) : value(v) {}
++  ~FD() { if (value >= 0) close(value); }
++};
++bool Protected(int fd, bool directory = false) {
++  struct stat st;
++  return fd >= 0 && fstat(fd, &st) == 0 && st.st_uid == geteuid() &&
++    (directory ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode)) &&
++    (st.st_mode & 0077) == 0 && (directory || st.st_nlink == 1);
++}
++bool Parse(const std::string &text, Json::Value *root) {
++  Json::CharReaderBuilder b;
++  b["rejectDupKeys"] = true;
++  b["failIfExtra"] = true;
++  std::unique_ptr<Json::CharReader> r(b.newCharReader());
++  std::string errors;
++  return r->parse(text.data(), text.data() + text.size(), root, &errors) && root->isObject();
++}
++bool Read(int dir, const std::string &name, Json::Value *root) {
++  FD fd(openat(dir, name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
++  if (!Protected(fd.value)) return false;
++  std::string text;
++  char buf[4096];
++  ssize_t n;
++  while ((n = read(fd.value, buf, sizeof(buf))) > 0) {
++    text.append(buf, n);
++    if (text.size() > 262144) return false;
++  }
++  return n == 0 && Parse(text, root);
++}
++std::string Encode(const std::string &s) {
++  const char *hex = "0123456789ABCDEF";
++  std::string out;
++  for (unsigned char c : s) {
++    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
++        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out += c;
++    else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
++  }
++  return out;
++}
++bool Token(const Json::Value &v) {
++  if (!v.isString()) return false;
++  const auto s = v.asString();
++  if (s.empty() || s.size() > 65536) return false;
++  for (unsigned char c : s) if (c <= 32 || c >= 127) return false;
++  return true;
++}
++bool Save(int dir, const std::string &name, const Json::Value &root) {
++  // One stable lock serializes this fixed temporary name. Exclusive creation
++  // fails closed on stale/symlinked files; never follows an attacker path.
++  const std::string temp = name + ".new";
++  FD fd(openat(dir, temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
++  if (fd.value < 0) return false;
++  Json::StreamWriterBuilder b;
++  const std::string data = Json::writeString(b, root);
++  size_t done = 0;
++  bool ok = true;
++  while (done < data.size()) {
++    const ssize_t n = write(fd.value, data.data() + done, data.size() - done);
++    if (n <= 0) { ok = false; break; }
++    done += n;
++  }
++  ok = ok && fsync(fd.value) == 0;
++  if (ok) ok = renameat(dir, temp.c_str(), dir, name.c_str()) == 0;
++  if (!ok) unlinkat(dir, temp.c_str(), 0);
++  return ok && fsync(dir) == 0;
++}
++}
++int ApplicationToken(const std::string &path, bool updates, bool force, std::string *token) {
++  // All errors are deliberately generic: JSON/curl exceptions can contain secrets.
++  try {
++    const auto *c = Config::Get();
++    const std::regex endpoint("https://login\\.microsoftonline\\.com/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/oauth2/v2\\.0/token");
++    if (!std::regex_match(c->token_endpoint(), endpoint) || c->client_id().empty() ||
++        c->client_id().size() > 4096 || c->client_secret().empty() || c->client_secret().size() > 8192)
++      return SASL_FAIL;
++    const auto slash = path.find_last_of('/');
++    if (slash == std::string::npos) return SASL_FAIL;
++    const std::string name = path.substr(slash + 1);
++    if (name.empty() || name == "." || name == "..") return SASL_FAIL;
++    FD dir(open(path.substr(0, slash).c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
++    if (!Protected(dir.value, true)) return SASL_FAIL;
++    FD lock(openat(dir.value, (name + ".lock").c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600));
++    if (!Protected(lock.value)) return SASL_FAIL;
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(55);
++    while (flock(lock.value, LOCK_EX | LOCK_NB) != 0) {
++      if (errno != EWOULDBLOCK || std::chrono::steady_clock::now() >= deadline) return SASL_TRYAGAIN;
++      std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    }
++    Json::Value cache;
++    if (!Read(dir.value, name, &cache)) return SASL_FAIL;
++    const time_t now = time(nullptr);
++    if (!force && Token(cache["access_token"]) && cache["expiry"].isInt64() &&
++        cache["expiry"].asInt64() > now + 60) {
++      *token = cache["access_token"].asString();
++      return SASL_OK;
++    }
++    const std::string request = "grant_type=client_credentials&client_id=" + Encode(c->client_id()) +
++      "&client_secret=" + Encode(c->client_secret()) + "&scope=" + Encode("https://outlook.office365.com/.default");
++    std::string response, error;
++    long code = 0;
++    const std::string url = c->token_endpoint(), proxy = c->proxy(), ca = c->ca_bundle_file(), capath = c->ca_certs_dir();
++    const int result = HttpPost({url, request, proxy, ca, capath, &code, &response, &error, true});
++    if (result != SASL_OK || code != 200 || response.size() > 262144) return SASL_TRYAGAIN;
++    Json::Value body;
++    if (!Parse(response, &body) || !Token(body["access_token"]) ||
++        !body["token_type"].isString() || (body["token_type"].asString() != "Bearer" && body["token_type"].asString() != "bearer") ||
++        !body["expires_in"].isInt64() || body["expires_in"].asInt64() <= 60 || body["expires_in"].asInt64() > 86400)
++      return SASL_BADPROT;
++    Json::Value fresh;
++    fresh["access_token"] = body["access_token"];
++    // Count lifetime from request start, not response receipt.
++    fresh["expiry"] = Json::Int64(now + body["expires_in"].asInt64());
++    if (fresh["expiry"].asInt64() <= time(nullptr) + 60) return SASL_TRYAGAIN;
++    if (updates && !Save(dir.value, name, fresh)) return SASL_FAIL;
++    *token = fresh["access_token"].asString();
++    return SASL_OK;
++  } catch (...) { return SASL_FAIL; }
++}
++}
+diff --git a/src/application_token.h b/src/application_token.h
+new file mode 100644
+index 0000000..3de475a
+--- /dev/null
++++ b/src/application_token.h
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: Apache-2.0
++#ifndef SASL_XOAUTH2_APPLICATION_TOKEN_H
++#define SASL_XOAUTH2_APPLICATION_TOKEN_H
++#include <string>
++namespace sasl_xoauth2 {
++int ApplicationToken(const std::string &path, bool updates, bool force,
++                     std::string *token);
++}
++#endif
+diff --git a/src/application_token_test.cc b/src/application_token_test.cc
+new file mode 100644
+index 0000000..5c48a2c
+--- /dev/null
++++ b/src/application_token_test.cc
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: Apache-2.0
++#include "application_token.h"
++#include "config.h"
++#include "http.h"
++#include "token_store.h"
++#include "log.h"
++#include "module.h"
++#include <cstdlib>
++#include <ctime>
++#include <sys/wait.h>
++#include <fcntl.h>
++#include <sasl/sasl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <cassert>
++#include <fstream>
++#include <string>
++using namespace sasl_xoauth2;
++namespace {
++int NoCallback(sasl_conn_t *, unsigned long, sasl_callback_ft *, void **) {
++  return SASL_FAIL;
++}
++int CanonUser(sasl_conn_t *, const char *, unsigned int, unsigned int,
++              sasl_out_params_t *) { return SASL_OK; }
++
++void TestSaslRejectionRenews(const std::string &path) {
++  sasl_utils_t utils = {};
++  utils.free = &free;
++  utils.malloc = &malloc;
++  utils.getcallback = &NoCallback;
++  int version = 0, count = 0;
++  sasl_client_plug_t *plugins = nullptr;
++  assert(sasl_client_plug_init(&utils, SASL_CLIENT_PLUG_VERSION, &version,
++                              &plugins, &count) == SASL_OK);
++  assert(count == 1);
++  const auto plug = plugins[0];
++  sasl_client_params_t params = {};
++  params.utils = &utils;
++  params.canon_user = &CanonUser;
++  const std::string mailbox = "relay@example.com";
++  for (const std::string status : {"400", "401"}) {
++    Json::Value cache;
++    cache["access_token"] = "rejected-token";
++    cache["expiry"] = Json::Int64(time(nullptr) + 3600);
++    { std::ofstream f(path); f << cache; }
++    int requests = 0;
++    SetHttpInterceptForTesting([&](HttpPostOptions o) {
++      ++requests;
++      assert(o.application_auth);
++      assert(o.data.find("grant_type=client_credentials&") == 0);
++      assert(o.data.find("refresh_token") == std::string::npos);
++      *o.response_code = 200;
++      *o.response = R"({"access_token":"renewed-token","token_type":"Bearer","expires_in":3600})";
++      return SASL_OK;
++    });
++    // Drive the same exported plugin entry points that Cyrus invokes. A fresh
++    // connection after SASL_TRYAGAIN must use the newly persisted token.
++    for (int connection = 0; connection < 2; ++connection) {
++      void *context = nullptr;
++      assert(plug.mech_new(nullptr, nullptr, &context) == SASL_OK);
++      auto *prompts = static_cast<sasl_interact_t *>(calloc(3, sizeof(sasl_interact_t)));
++      assert(prompts);
++      prompts[0].id = SASL_CB_AUTHNAME;
++      prompts[0].result = mailbox.data();
++      prompts[0].len = mailbox.size();
++      prompts[1].id = SASL_CB_PASS;
++      prompts[1].result = path.data();
++      prompts[1].len = path.size();
++      prompts[2].id = SASL_CB_LIST_END;
++      const char *output = nullptr;
++      unsigned int size = 0;
++      sasl_out_params_t out = {};
++      assert(plug.mech_step(context, &params, nullptr, 0, &prompts,
++                            &output, &size, &out) == SASL_OK);
++      assert(prompts == nullptr);
++      const std::string expected = "user=" + mailbox + "\1auth=Bearer " +
++          (connection == 0 ? "rejected-token" : "renewed-token") + "\1\1";
++      assert(std::string(output, size) == expected);
++      assert(requests == connection);
++      if (connection == 0) {
++        const std::string challenge = "{\"status\":\"" + status + "\"}";
++        assert(plug.mech_step(context, &params, challenge.data(), challenge.size(),
++                              nullptr, &output, &size, &out) == SASL_TRYAGAIN);
++        assert(requests == 1 && size == 0);
++      } else {
++        assert(plug.mech_step(context, &params, "", 0, nullptr,
++                              &output, &size, &out) == SASL_OK);
++        assert(size == 0 && requests == 1);
++      }
++      plug.mech_dispose(context, &utils);
++    }
++    std::ifstream f(path);
++    Json::Value persisted;
++    f >> persisted;
++    assert(persisted["access_token"].asString() == "renewed-token");
++    assert(!persisted.isMember("refresh_token"));
++  }
++  SetHttpInterceptForTesting({});
++}
++}
++int main() {
++  Json::Value config;
++  config["client_id"] = "id+&%";
++  config["client_secret"] = "secret+&%= /";
++  config["grant_type"] = "client_credentials";
++  config["token_endpoint"] = "https://login.microsoftonline.com/11111111-1111-1111-1111-111111111111/oauth2/v2.0/token";
++  assert(Config::InitForTesting(config) == SASL_OK);
++  char dir[] = "/tmp/app-auth-test.XXXXXX";
++  assert(mkdtemp(dir));
++  const std::string path = std::string(dir) + "/token.json";
++  { std::ofstream f(path); f << "{}"; }
++  chmod(path.c_str(), 0600);
++  int calls = 0;
++  std::string response = R"({"access_token":"test-token","token_type":"Bearer","expires_in":3600})";
++  SetHttpInterceptForTesting([&](HttpPostOptions o) {
++    ++calls;
++    assert(o.application_auth);
++    assert(o.data == "grant_type=client_credentials&client_id=id%2B%26%25&client_secret=secret%2B%26%25%3D%20%2F&scope=https%3A%2F%2Foutlook.office365.com%2F.default");
++    *o.response_code = 200; *o.response = response; return SASL_OK;
++  });
++  std::string token;
++  assert(ApplicationToken(path, true, false, &token) == SASL_OK && token == "test-token" && calls == 1);
++  assert(ApplicationToken(path, true, false, &token) == SASL_OK && calls == 1);
++  struct stat st;
++  assert(stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
++  for (const auto &bad : {"{}", "invalid", R"({"access_token":"leak","token_type":"Bearer","expires_in":0})", R"({"access_token":"leak","token_type":"Bearer","expires_in":"3600"})", R"({"access_token":"bad\nvalue","token_type":"Bearer","expires_in":3600})"}) {
++    response = bad;
++    assert(ApplicationToken(path, true, true, &token) != SASL_OK);
++  }
++  // Failure must preserve the last usable cache.
++  assert(ApplicationToken(path, true, false, &token) == SASL_OK && token == "test-token");
++  response = R"({"access_token":"new-token","token_type":"Bearer","expires_in":3600})";
++  // Exercise the public TokenStore wiring without a refresh_token field.
++  auto log = Log::Create();
++  auto store = TokenStore::Create(log.get(), path);
++  assert(store && store->Refresh() == SASL_OK);
++  assert(store->GetAccessToken(&token) == SASL_OK && token == "new-token");
++  // Separate SASL processes serialize refresh and reread the shared cache.
++  { std::ofstream f(path); f << "{}"; }
++  const std::string counter = std::string(dir) + "/requests";
++  SetHttpInterceptForTesting([&](HttpPostOptions o) {
++    int fd = open(counter.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
++    assert(fd >= 0 && write(fd, "x", 1) == 1); close(fd);
++    usleep(50000);
++    *o.response_code = 200; *o.response = response; return SASL_OK;
++  });
++  for (int i = 0; i < 8; ++i) {
++    const pid_t pid = fork(); assert(pid >= 0);
++    if (pid == 0) _exit(ApplicationToken(path, true, false, &token) == SASL_OK ? 0 : 1);
++  }
++  for (int i = 0; i < 8; ++i) {
++    int status; assert(wait(&status) > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
++  }
++  assert(stat(counter.c_str(), &st) == 0 && st.st_size == 1);
++  unlink(counter.c_str());
++  SetHttpInterceptForTesting([](HttpPostOptions o) {
++    *o.response_code = 401; *o.response = "sensitive-server-error"; return SASL_OK;
++  });
++  assert(ApplicationToken(path, true, true, &token) != SASL_OK);
++  assert(ApplicationToken(path, true, false, &token) == SASL_OK && token == "new-token");
++  TestSaslRejectionRenews(path);
++  chmod(path.c_str(), 0644);
++  assert(ApplicationToken(path, true, false, &token) != SASL_OK);
++  unlink(path.c_str());
++  assert(symlink("/etc/passwd", path.c_str()) == 0);
++  assert(ApplicationToken(path, true, false, &token) != SASL_OK);
++  unlink(path.c_str()); unlink((path + ".lock").c_str()); rmdir(dir);
++}
+diff --git a/src/client.cc b/src/client.cc
+index bbb35a7..586174f 100644
+--- a/src/client.cc
++++ b/src/client.cc
+@@ -33,7 +33,7 @@ void ReadPrompt(Log *log, sasl_interact_t **prompts, const unsigned int id,
+   for (const auto *p = *prompts; p->id != SASL_CB_LIST_END; ++p) {
+     if (p->id == id) {
+       value->assign(static_cast<const char *>(p->result), p->len);
+-      log->Write("ReadPrompt: found id %d with value [%s]", id, value->c_str());
++      log->Write("ReadPrompt: found id %d", id);
+       return;
+     }
+   }
+@@ -243,7 +243,7 @@ int Client::TokenSentStep(sasl_client_params_t *params,
+   *to_server = nullptr;
+   *to_server_len = 0;
+ 
+-  log_->Write("Client::TokenSentStep: from server: %s", from_server);
++  log_->Write("Client::TokenSentStep: received response");
+ 
+   if (from_server_len == 0) return SASL_OK;
+ 
+@@ -256,7 +256,7 @@ int Client::TokenSentStep(sasl_client_params_t *params,
+     stream >> root;
+     if (root.isMember("status")) status = root["status"].asString();
+   } catch (const std::exception &e) {
+-    log_->Write("Client::TokenSentStep: caught exception: %s", e.what());
++    log_->Write("Client::TokenSentStep: invalid response");
+     return SASL_BADPROT;
+   }
+ 
+@@ -271,7 +271,7 @@ int Client::TokenSentStep(sasl_client_params_t *params,
+     return SASL_OK;
+   }
+ 
+-  log_->Write("Client::TokenSentStep: status: %s", status.c_str());
++  log_->Write("Client::TokenSentStep: server rejected authentication");
+   return SASL_BADPROT;
+ }
+ 
+@@ -281,7 +281,7 @@ int Client::SendToken(const char **to_server, unsigned int *to_server_len) {
+   if (err != SASL_OK) return err;
+ 
+   response_ = "user=" + user_ + "\1auth=Bearer " + token + "\1\1";
+-  log_->Write("Client::SendToken: response: %s", response_.c_str());
++  log_->Write("Client::SendToken: response prepared");
+ 
+   *to_server = response_.data();
+   *to_server_len = response_.size();
+diff --git a/src/config.cc b/src/config.cc
+index b3a93f6..05ee8e5 100644
+--- a/src/config.cc
++++ b/src/config.cc
+@@ -118,7 +118,7 @@ int Config::Init(std::string path) {
+     return s_config->Init(root);
+ 
+   } catch (const std::exception &e) {
+-    Log("sasl-xoauth2: Exception during init: %s\n", e.what());
++    Log("sasl-xoauth2: Invalid configuration\n");
+     return SASL_FAIL;
+   }
+ }
+@@ -144,6 +144,8 @@ Config *Config::Get() {
+ int Config::Init(const Json::Value &root) {
+   try {
+     int err;
++    err = Fetch(root, "grant_type", true, &grant_type_);
++    if (err != SASL_OK || (grant_type_ != "refresh_token" && grant_type_ != "client_credentials")) return SASL_FAIL;
+ 
+     err = Fetch(root, "client_id", false, &client_id_);
+     if (err != SASL_OK) return err;
+@@ -181,7 +183,7 @@ int Config::Init(const Json::Value &root) {
+     return 0;
+ 
+   } catch (const std::exception &e) {
+-    Log("sasl-xoauth2: Exception during init: %s\n", e.what());
++    Log("sasl-xoauth2: Invalid configuration\n");
+     return SASL_FAIL;
+   }
+ }
+diff --git a/src/config.h b/src/config.h
+index c52d311..d319d8c 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -41,6 +41,7 @@ class Config {
+   std::string proxy() const { return proxy_; }
+   std::string ca_bundle_file() const { return ca_bundle_file_; }
+   std::string ca_certs_dir() const { return ca_certs_dir_; }
++  bool application_auth() const { return grant_type_ == "client_credentials"; }
+   int refresh_window() const { return refresh_window_; }
+ 
+  private:
+@@ -48,6 +49,7 @@ class Config {
+ 
+   int Init(const Json::Value &root);
+ 
++  std::string grant_type_ = "refresh_token";
+   std::string client_id_;
+   std::string client_secret_;
+   bool always_log_to_syslog_ = false;
+diff --git a/src/http.cc b/src/http.cc
+index 5efaa0e..c90a3b2 100644
+--- a/src/http.cc
++++ b/src/http.cc
+@@ -51,6 +51,7 @@ class RequestContext {
+ 
+     auto *request = static_cast<RequestContext *>(context);
+     size_t old_size = request->from_server_.size();
++    if (size > 262144 || old_size > 262144 - size) return 0;
+     request->from_server_.resize(old_size + size);
+     memcpy(&request->from_server_[old_size], data, size);
+ 
+@@ -132,7 +133,20 @@ int HttpPost(HttpPostOptions options) {
+   }
+ 
+   // HTTP.
+-  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, true);
++  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, !options.application_auth);
++  if (options.application_auth) {
++    // EL8 libcurl supports these options (avoid newer *_STR APIs).
++#if LIBCURL_VERSION_NUM >= 0x075500
++    curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https");
++#else
++    curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
++#endif
++    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
++    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
++    curl_easy_setopt(curl.get(), CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
++    curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 10L);
++    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 45L);
++  }
+   curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, kUserAgent);
+   if (!options.proxy.empty())
+     curl_easy_setopt(curl.get(), CURLOPT_PROXY, options.proxy.c_str());
+diff --git a/src/http.h b/src/http.h
+index 781491f..c654add 100644
+--- a/src/http.h
++++ b/src/http.h
+@@ -32,6 +32,7 @@ struct HttpPostOptions {
+   long *response_code;
+   std::string *response;
+   std::string *error;
++  bool application_auth = false;
+ };
+ 
+ using HttpIntercept = std::function<int(HttpPostOptions)>;
+diff --git a/src/test_config.cc b/src/test_config.cc
+index 8718379..01b099c 100644
+--- a/src/test_config.cc
++++ b/src/test_config.cc
+@@ -10,13 +10,15 @@
+ namespace {
+ 
+ struct Options {
++  bool application_capability = false;
+   std::string config_path;
+   std::string token_path;
+ };
+ 
+ bool TryParseCommandLine(int argc, char **argv, Options *out) {
+   const char *kShortOptions = "c:r:";
+-  const option kLongOptions[] = {{"config", required_argument, nullptr, 'c'},
++  const option kLongOptions[] = {{"application-auth-capability", no_argument, nullptr, 'a'},
++                                 {"config", required_argument, nullptr, 'c'},
+                                  {"token", required_argument, nullptr, 'r'},
+                                  {nullptr, 0, nullptr, 0}};
+ 
+@@ -25,6 +27,10 @@ bool TryParseCommandLine(int argc, char **argv, Options *out) {
+     if (opt == -1) break;
+ 
+     switch (opt) {
++      case 'a':
++        out->application_capability = true;
++        break;
++
+       case 'c':
+         out->config_path = optarg;
+         break;
+@@ -69,6 +75,11 @@ Options ParseCommandLine(int argc, char **argv) {
+ int main(int argc, char **argv) {
+   const Options options = ParseCommandLine(argc, argv);
+ 
++  if (options.application_capability) {
++    puts("smtp-oauth-cli-client-credentials-v1");
++    return EXIT_SUCCESS;
++  }
++
+   sasl_xoauth2::Config::EnableLoggingToStderr();
+   if (sasl_xoauth2::Config::Init(options.config_path) != SASL_OK) {
+     printf("Config check failed.\n");
+diff --git a/src/token_store.cc b/src/token_store.cc
+index c778d50..11df7e2 100644
+--- a/src/token_store.cc
++++ b/src/token_store.cc
+@@ -28,6 +28,7 @@
+ #include <sstream>
+ 
+ #include "config.h"
++#include "application_token.h"
+ #include "http.h"
+ #include "log.h"
+ 
+@@ -73,6 +74,7 @@ void WriteOverride(const std::string &key,
+ }
+ 
+ int TokenStore::GetAccessToken(std::string *token) {
++  if (Config::Get()->application_auth()) return ApplicationToken(path_, enable_updates_, false, token);
+   const int refresh_window =
+       override_refresh_window_.value_or(Config::Get()->refresh_window());
+ 
+@@ -92,6 +94,7 @@ int TokenStore::Refresh() {
+     return SASL_BADPROT;
+   }
+   refresh_attempts_++;
++  if (Config::Get()->application_auth()) return ApplicationToken(path_, enable_updates_, true, &access_);
+   log_->Write("TokenStore::Refresh: attempt %d", refresh_attempts_);
+ 
+   const std::string client_id =
+@@ -117,7 +120,7 @@ int TokenStore::Refresh() {
+   long response_code = 0;
+   log_->Write("TokenStore::Refresh: token_endpoint: %s",
+               token_endpoint.c_str());
+-  log_->Write("TokenStore::Refresh: request: %s", request.c_str());
++
+ 
+   std::string http_error;
+   int err = HttpPost({.url = token_endpoint,
+@@ -129,12 +132,11 @@ int TokenStore::Refresh() {
+                       .response = &response,
+                       .error = &http_error});
+   if (err != SASL_OK) {
+-    log_->Write("TokenStore::Refresh: http error: %s", http_error.c_str());
++    log_->Write("TokenStore::Refresh: HTTP error");
+     return err;
+   }
+ 
+-  log_->Write("TokenStore::Refresh: code=%d, response=%s", response_code,
+-              response.c_str());
++  log_->Write("TokenStore::Refresh: code=%ld", response_code);
+ 
+   if (response_code != 200) {
+     log_->Write("TokenStore::Refresh: request failed");
+@@ -165,7 +167,7 @@ int TokenStore::Refresh() {
+     }
+     expiry_ = time(nullptr) + expiry_sec;
+   } catch (const std::exception &e) {
+-    log_->Write("TokenStore::Refresh: exception=%s", e.what());
++    log_->Write("TokenStore::Refresh: invalid data");
+     return SASL_FAIL;
+   }
+ 
+@@ -176,6 +178,7 @@ TokenStore::TokenStore(Log *log, const std::string &path, bool enable_updates)
+     : log_(log), path_(path), enable_updates_(enable_updates) {}
+ 
+ int TokenStore::Read() {
++  if (Config::Get()->application_auth()) return SASL_OK;
+   try {
+     log_->Write("TokenStore::Read: file=%s", path_.c_str());
+ 
+@@ -210,12 +213,11 @@ int TokenStore::Read() {
+ 
+     ReadOverride(root, "user", &user_);
+ 
+-    log_->Write("TokenStore::Read: refresh=%s, access=%s, user=%s",
+-                refresh_.c_str(), access_.c_str(), user_.value_or("").c_str());
++
+     return SASL_OK;
+ 
+   } catch (const std::exception &e) {
+-    log_->Write("TokenStore::Read: exception=%s", e.what());
++    log_->Write("TokenStore::Read: invalid data");
+     return SASL_FAIL;
+   }
+ }
+@@ -256,7 +258,7 @@ int TokenStore::Write() {
+     file << root;
+ 
+   } catch (const std::exception &e) {
+-    log_->Write("TokenStore::Write: exception=%s", e.what());
++    log_->Write("TokenStore::Write: invalid data");
+     return SASL_FAIL;
+   }
+ 

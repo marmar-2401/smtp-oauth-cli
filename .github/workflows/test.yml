@@ -1,0 +1,30 @@
+name: Local validation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native-and-deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: sudo apt-get update && sudo apt-get install -y cmake g++ libcurl4-openssl-dev libsasl2-dev libjsoncpp-dev pkg-config shellcheck jq
+      - run: curl --fail --location --proto '=https' --proto-redir '=https' https://codeload.github.com/tarickb/sasl-xoauth2/tar.gz/35c732eca1eb67de04d417e77848a3326626fab2 -o /tmp/upstream.tar.gz
+      - run: sudo bash tests/run.sh /tmp/upstream.tar.gz
+  el-package:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['8', '9', '10']
+    container: almalinux:${{ matrix.version }}
+    steps:
+      - run: dnf install -y git dnf-plugins-core epel-release
+      - run: |
+          if [ '${{ matrix.version }}' = 8 ]; then
+            dnf config-manager --set-enabled powertools
+          else
+            dnf config-manager --set-enabled crb
+          fi
+          dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build curl patch
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: bash packaging/build-rpm.sh /tmp/smtp-rpm-build
