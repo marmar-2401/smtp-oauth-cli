@@ -21,74 +21,41 @@ Copy this into the setup request:
 > Your email team handles Microsoft permissions. Our Linux team handles server networking and Postfix.
 > If application-only SMTP is not allowed, tell us before setup.
 
-## 2. Download and copy the package
+## 2. Clone the repository
 
-The special **`sasl-xoauth2-m365-cli` RPM is required**. The stock plugin cannot do this.
-
-On your workstation, open [QA downloads](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41493182792).
-Under **Artifacts**, download a bundle matching your server, such as
-`qa-alma-el9-x86_64` for AlmaLinux 9. Choose a package whose job passed.
-Extract the ZIP and copy its contents to `/root/smtp-qa/` on Linux.
-Follow this current guide; the ZIP contains an older README.
-
-Or use GitHub CLI on your workstation (AlmaLinux 9 example):
+As **root**, on the Linux server:
 
 ```bash
-gh run download 41493182792 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
-scp -r qa-el9/. root@YOUR_LAB_HOST:/root/smtp-qa/
-```
-
-Replace `YOUR_LAB_HOST` with your server. These test packages are available for
-30 days; ask the maintainer if a download is missing. Current bundles are x86_64.
-For RHEL or aarch64, ask for a matching tested package.
-
-## 3. Prepare Linux
-
-Log in as **root**. Run all remaining Linux commands from this directory:
-
-```bash
-cd /root/smtp-qa
-cat /etc/os-release
-uname -m
-dnf install -y postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq ca-certificates util-linux iproute policycoreutils policycoreutils-python-utils
-```
-
-Install the matching RPM. This example is for EL9 on x86_64; use `el8` or `el10`
-for those versions. Do not install the `.src.rpm` file.
-
-```bash
-dnf install packages/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el9.x86_64.rpm
-```
-
-The Linux team must allow DNS, correct system time, and outbound TCP **443** to
-`login.microsoftonline.com` and **587** to `smtp.office365.com`.
-If this server already relays mail, stop here and plan migration before replacing its plugin.
-
-## 4. Fill in the private configuration
-
-```bash
+git clone https://github.com/marmar-2401/smtp-oauth-cli.git /root/smtp-oauth-cli
+cd /root/smtp-oauth-cli
 install -d -m 700 /root/smtp-oauth
 install -m 600 m365-client-template.json /root/smtp-oauth/client.json
 vi /root/smtp-oauth/client.json
 ```
 
-In `vi`, press `i` to edit. Replace each `REPLACE_WITH_...` value with the email
+In `vi`, press `i`. Replace each `REPLACE_WITH_...` value with the email
 administrator's value. Keep the quotes and commas; leave `provider` as `m365`.
 Use the secret **value**, not its ID. Press `Esc`, type `:wq`, then press Enter.
-Keep this file private. Never paste its contents into logs or support tickets.
+Keep this file private; never paste it into support tickets.
 
-## 5. Check and install
+## 3. Install
 
 ```bash
-bash smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh status
 ```
 
-Continue only if each command succeeds. Expect `Local prerequisites passed`, then
-`Installed`, and no errors from `status`. An empty token cache before the first send is normal.
+The installer reads the Linux version and processor type, selects the matching
+package, and asks before installing required packages and configuring Postfix.
+It uses your enabled OS repositories. No GitHub login or browser is needed.
+An existing relay or stock OAuth plugin needs a planned migration first.
 
-## 6. Send two test messages
+Expect `Installed` and no errors from `status`. An empty token cache before the
+first send is normal. Run later commands from `/root/smtp-oauth-cli`.
+The Linux team needs working DNS, correct time, and outbound TCP 443 to
+`login.microsoftonline.com` and TCP 587 to `smtp.office365.com`.
+
+## 4. Send two test messages
 
 Replace `operator@example.com` with your approved test recipient. Confirm the prompts.
 
@@ -205,7 +172,7 @@ On your workstation, as the lab's email administrator:
    this flow is allowed: if Security Defaults blocks SMTP AUTH, stop for an
    administrator-approved solution. Do not turn it off just for testing.
 
-On Linux, follow steps 2–6 and the manual QA checklist. Use your own approved inbox
+On Linux, follow steps 2–4 and the manual QA checklist. Use your own approved inbox
 as the recipient. After QA, remove unused test credentials and recheck that renewal is off.
 
 ---

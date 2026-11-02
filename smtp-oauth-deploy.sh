@@ -93,6 +93,57 @@ detect_platform() {
     . /etc/os-release
     platform_values "$ID" "$VERSION_ID" "$(uname -m)"
 }
+# Release URLs and digests must be populated from independently verified public assets.
+# An empty catalog fails before changing the host; never guess a download URL.
+declare -A APPROVED_PACKAGE_URLS=() APPROVED_PACKAGE_HASHES=()
+select_package_asset() {
+    local key="$PLATFORM_ID:$PLATFORM_MAJOR:$PLATFORM_ARCH"
+    PACKAGE_URL=${APPROVED_PACKAGE_URLS[$key]:-}
+    PACKAGE_SHA256=${APPROVED_PACKAGE_HASHES[$key]:-}
+    case "$PLATFORM_ID:$PLATFORM_MAJOR:$PLATFORM_ARCH" in
+        rhel:*) die 'Automatic RHEL packages are not available; obtain a separately validated package.' ;;
+        *:aarch64) die 'Automatic aarch64 packages are not available; obtain a matching tested package.' ;;
+    esac
+    [[ -n $PACKAGE_URL && -n $PACKAGE_SHA256 ]] || die "No approved public package is configured for $PLATFORM_ID $PLATFORM_MAJOR $PLATFORM_ARCH. Package publication is pending."
+}
+bootstrap_install_packages() {
+    local path package metadata
+    detect_platform
+    command -v dnf >/dev/null || die 'DNF is required to install the platform packages.'
+    command -v rpm >/dev/null || die 'RPM is required to inspect installed packages.'
+    # Already provisioned hosts continue through the existing integrity/capability checks.
+    rpm -q sasl-xoauth2-m365-cli >/dev/null 2>&1 && return 0
+    rpm -q sasl-xoauth2 >/dev/null 2>&1 && die 'Stock sasl-xoauth2 is installed. Plan its replacement first; no packages were changed.'
+    for path in "$STATE" "$LEGACY_STATE" "$TOKENDIR" "$MAP" "$MAP.db" "$MAP.lmdb" "$CONFIG"; do
+        exists "$path" && die "Existing relay configuration at $path. Plan migration first; no packages were changed."
+    done
+    if command -v postconf >/dev/null; then
+        [[ -z $(postconf -h relayhost) ]] || die 'Postfix already has a relay configured. Plan migration first; no packages were changed.'
+    fi
+    protected_file "$INPUT"
+    select_package_asset
+    [[ $PACKAGE_URL == https://github.com/marmar-2401/smtp-oauth-cli/releases/download/* && $PACKAGE_SHA256 =~ ^[a-f0-9]{64}$ ]] || die 'The approved package catalog is incomplete.'
+    say "Detected $PLATFORM_ID $PLATFORM_MAJOR ($PLATFORM_ARCH)."
+    say 'Install required OS packages from enabled repositories and the matching OAuth plugin. Packages remain installed if relay setup later fails.'
+    confirm 'Install these packages and continue relay setup?'
+    dnf --setopt=timeout=30 --setopt=retries=2 install -y ca-certificates jq || die 'Cannot install bootstrap dependencies from the enabled repositories.'
+    validate_config "$INPUT"
+    if ! command -v curl >/dev/null; then
+        dnf --setopt=timeout=30 --setopt=retries=2 install -y curl || die 'Cannot install curl from the enabled repositories.'
+    fi
+    workdir
+    package="$WORK/application-plugin.rpm"
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 120 --max-filesize 52428800 --max-redirs 3 \
+        --output "$package" "$PACKAGE_URL" || die 'Package download failed. Check HTTPS access and retry.'
+    [[ $(sha256sum "$package" | cut -d ' ' -f 1) == "$PACKAGE_SHA256" ]] || die 'Downloaded package failed its automatic integrity check.'
+    metadata=$(rpm -qp --qf '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}' "$package") || die 'Downloaded file is not a readable RPM.'
+    [[ $metadata == "sasl-xoauth2-m365-cli 0.28-1.smtpcli.el$PLATFORM_MAJOR $PLATFORM_ARCH" ]] || die 'Downloaded package does not match this platform.'
+    dnf --setopt=timeout=30 --setopt=retries=2 install -y \
+        postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq ca-certificates \
+        util-linux iproute policycoreutils policycoreutils-python-utils "$package" || \
+        die 'Package installation failed. Check enabled repositories; existing packages were not automatically removed.'
+}
 prerequisites() {
     local command version
     for command in jq realpath stat flock timeout runuser rpm postconf postmap postfix postqueue systemctl sha256sum getenforce ss; do
@@ -593,7 +644,6 @@ main() {
         esac
     done
     case "$cmd" in check|install|status|test|import-token|uninstall|recover-import) ;; *) die 'Unknown command; use --help.' ;; esac
-    command -v jq >/dev/null || die 'Install jq before using this script.'
     exists "$LEGACY_STATE" && die 'An older smtp-oauth-deploy installation/recovery path exists. Use its original script to uninstall it first; this release will not overwrite it.'
     [[ ! -L $LOCK ]] || die 'Lock path is a symlink.'
     if exists "$LOCK"; then
@@ -602,6 +652,11 @@ main() {
     exec 9>"$LOCK"; flock -n 9 || die 'Another SMTP OAuth operation is running.'
     SELF=$(realpath -e -- "${BASH_SOURCE[0]}")
     trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+    if [[ $cmd == install ]]; then
+        [[ -n $INPUT ]] || die '--config is required.'
+        bootstrap_install_packages
+    fi
+    command -v jq >/dev/null || die 'Install jq before using this script.'
     case "$cmd" in
         recover-import) recover_main ;;
         check) prerequisites; if [[ -n $INPUT ]]; then validate_config "$INPUT"; say "Credential structure passed for $provider / $mailbox."; fi
