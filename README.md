@@ -1,424 +1,213 @@
-# Microsoft 365 SMTP relay — CLI only
+# Microsoft 365 email from a Linux server
 
-Start with `smtp-oauth-deploy.sh` and `m365-client-template.json` beside this guide.
-Main contains only these three files. The required OAuth RPM is distributed separately.
-Build source, license, tests and CI are preserved on the
-[maintenance branch](https://github.com/marmar-2401/smtp-oauth-cli/tree/maintenance/m365-build);
-operators do not need that branch.
+Applications send to `127.0.0.1:25`. Postfix forwards their email through Microsoft 365.
+No browser or mailbox sign-in is needed on Linux.
 
-Postfix accepts application mail at **127.0.0.1:25** and sends it through
-`smtp.office365.com:587` with verified TLS and application-only OAuth.
-This application-only workflow needs no mailbox login, device code, browser,
-user refresh token or token daemon. Configure the tenant ID, application ID,
-client secret and one sending mailbox for each deployment. The tenant's
-administrator must approve the application and mailbox scope.
+Use a dedicated server and one sending mailbox. This supports commercial Microsoft 365
+with a client secret, the application's private password. Target systems are AlmaLinux,
+Rocky Linux, RHEL and Oracle Linux 8/9/10. **Test on your platform and sending tenant
+before production; live testing and RHEL qualification are still pending.**
 
-Scope: **commercial Microsoft 365**, client-secret authentication and one mailbox
-per dedicated Postfix instance. Certificate credentials, sovereign clouds, personal
-Outlook.com, Gmail and other providers are outside this release. The original 2.1.0
-delegated workflow remains in Git at commit `4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`.
+## 1. Ask the client email administrator
 
-**QA candidate; live qualification pending:** target platforms are AlmaLinux, Rocky Linux,
-Red Hat Enterprise Linux and Oracle Linux, each at major 8/9/10. Native tests and container package builds do not certify
-live systems, SELinux or a tenant's authorization policy. Centrally managed tenants
-may require approval from their service provider. Complete [administrator and QA instructions below](#email-administrator-reference-and-lab-qualification)
-before production. It includes the Business Basic one-month trial lab; activate
-the trial after the matching package is ready.
+Copy this into the setup request:
 
-## Client email setup requirements — copy into a new task
+> Please provide:
+> 1. The sending mailbox address.
+> 2. Confirmation that application-only OAuth SMTP sending is allowed without mailbox sign-in.
+> 3. A completed `m365-client-template.json`, sent through our secure channel. Your email administrator supplies the tenant ID, application ID and secret, and grants mailbox access. Do not paste secrets into the task.
+> 4. An email administrator contact, test recipient, and owner for renewing the secret before expiry.
+>
+> Your email team handles Microsoft permissions. Our Linux team handles server networking and Postfix.
+> If application-only SMTP is not allowed, tell us before setup.
 
-Send the client email administrator the [configuration template](m365-client-template.json)
-and this checklist. You do not need to configure Microsoft 365 yourself.
+## 2. Download and copy the package
 
-```text
-CLIENT EMAIL SETUP REQUIREMENTS
+The special **`sasl-xoauth2-m365-cli` RPM is required**. The stock plugin cannot do this.
 
-Please have your email administrator provide:
+On your workstation, open [QA downloads](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629).
+Under **Artifacts**, download a bundle matching your server, such as
+`qa-alma-el9-x86_64` for AlmaLinux 9. Choose a package whose job passed.
+Extract the ZIP and copy its contents to `/root/smtp-qa/` on Linux.
 
-1. The email address our application should send from.
-
-2. Confirmation that your Microsoft 365 service permits application-only OAuth
-   SMTP sending, without signing in to the mailbox.
-
-3. A completed client configuration template through an approved secure channel.
-   Your email administrator supplies the tenant ID, application ID and client
-   secret, and grants sending access to the mailbox. Never paste the secret
-   into this task.
-
-4. An email administrator contact and a test recipient who will confirm delivery.
-   Identify who will renew the client secret before it expires.
-
-Your email team handles Microsoft 365 permissions and credentials.
-Our Linux team checks the server network, configures Postfix and verifies sending.
-
-If application-only SMTP is not permitted, tell us before setup so we can review
-another supported method separately.
-```
-
-The email administrator completes the existing JSON fields `provider`, `mailbox`,
-`tenant`, `client_id` and `client_secret`. Keep `provider` set to `m365`. Transfer the
-completed file securely; the Linux operator follows the deployment steps below.
-Detailed Microsoft steps are in the optional email-administrator reference later
-in this guide, not a prerequisite for the Linux operator to become a Windows admin.
-
-## 1. Obtain the approved package and configuration
-
-Have the administrator complete [administrator and QA instructions below](#email-administrator-reference-and-lab-qualification) and securely supply the tenant
-ID, application ID, sending mailbox and **secret value**, with its expiration date.
-The separate `sasl-xoauth2-m365-cli` RPM is required: stock sasl-xoauth2 cannot do
-this flow. Clients do not compile the plugin. Use an approved signed production
-RPM, or a matching **unsigned QA bundle** on a disposable lab host only.
-
-For QA, download the matching `qa-DISTRO-elMAJOR-x86_64` bundle from
-[this build's Artifacts](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629)
-on your workstation. Select `alma`, `rocky` or `oracle` and major `8`, `9` or `10`.
-Use a package whose build job passed. No compilation is needed on the server.
-
-GitHub CLI example for AlmaLinux 9:
+Or use GitHub CLI on your workstation (AlmaLinux 9 example):
 
 ```bash
 gh run download 41494598629 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
 scp -r qa-el9/. root@YOUR_LAB_HOST:/root/smtp-qa/
 ```
 
-These unsigned lab downloads expire after 30 days. A permanent package release is
-pending approval; if the download has expired, ask the maintainer for the package.
-Current packages are x86_64. RHEL and aarch64 need separately validated packages.
+Replace `YOUR_LAB_HOST` with your server. Downloads are unsigned lab packages and
+expire after 30 days; a permanent release is pending. If missing, ask the maintainer.
+Current bundles are x86_64; RHEL and aarch64 need separately validated packages.
 
-On the Linux server, run the following as **root**:
+## 3. Prepare Linux
+
+Log in as **root**. Run all remaining Linux commands from this directory:
 
 ```bash
 cd /root/smtp-qa
 cat /etc/os-release
 uname -m
-```
-
-Use the RPM matching the server's distribution, major version and architecture.
-The Linux team checks DNS, system time, TLS trust and outbound TCP 443/587.
-
-Install OS prerequisites from your approved repositories:
-
-```bash
 dnf install -y postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq ca-certificates util-linux iproute policycoreutils policycoreutils-python-utils
 ```
 
-On an existing delegated installation, first pause submissions, drain its queue and
-follow recovery below **before changing plugin packages**. The application RPM
-conflicts explicitly with stock `sasl-xoauth2`; review the package replacement
-transaction, including any dependents. This installer never removes packages.
-Install the matching RPM (EL9 QA example below; select EL8/10 as appropriate, or
-substitute the approved signed production RPM path):
+Install the matching RPM. This example is for EL9 on x86_64; use `el8` or `el10`
+for those versions. Do not install the `.src.rpm` file.
 
 ```bash
 dnf install packages/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el9.x86_64.rpm
+```
+
+The Linux team must allow DNS, correct system time, and outbound TCP **443** to
+`login.microsoftonline.com` and **587** to `smtp.office365.com`.
+If this server already relays mail, stop here and plan migration before replacing its plugin.
+
+## 4. Fill in the private configuration
+
+```bash
 install -d -m 700 /root/smtp-oauth
 install -m 600 m365-client-template.json /root/smtp-oauth/client.json
 vi /root/smtp-oauth/client.json
+```
+
+In `vi`, press `i` to edit. Replace each `REPLACE_WITH_...` value with the email
+administrator's value. Keep the quotes and commas; leave `provider` as `m365`.
+Use the secret **value**, not its ID. Press `Esc`, type `:wq`, then press Enter.
+Keep this file private. Never paste its contents into logs or support tickets.
+
+## 5. Check and install
+
+```bash
 bash smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh status
 ```
 
-Keep JSON private and root-owned. Enter credentials in the file, never in shell
-arguments or tickets. The installer checks the application token exchange; this
-alone does not prove mailbox authorization. It snapshots existing Postfix settings,
-checks the queue, and rolls back failed activation. Use a dedicated standard Postfix
-instance without custom transports or SMTP service overrides. It installs a narrow
-SELinux policy when SELinux is enabled; it does not change firewall or tenant policy.
+Continue only if each command succeeds. Expect `Local prerequisites passed`, then
+`Installed`, and no errors from `status`. An empty token cache before the first send is normal.
 
-## 2. Verify delivery
+## 6. Send two test messages
 
-These commands each send one actual message. Replace the recipient and approve the
-prompt. `--force-refresh` clears the cached token and proves native acquisition:
+Replace `operator@example.com` with your approved test recipient. Confirm the prompts.
 
 ```bash
 bash smtp-oauth-deploy.sh test --recipient operator@example.com
 bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
 ```
 
-Success requires queue-ID-matched upstream `status=sent`, not just local acceptance.
-Confirm receipt separately. Configure your application to use **127.0.0.1, port 25**,
-with the approved mailbox as sender. Local submissions need no SMTP credentials.
-Other local users can also submit mail; use a dedicated trusted server.
+Both must print **`RELAY ACCEPTED`** with a queue ID. The recipient must confirm both
+messages arrived. The second test obtains a new access token.
 
-## 3. Replace an expiring secret or recover
+Configure your application on this same server:
 
-Before expiry, obtain an approved replacement secret, update the protected JSON,
-then run:
+| Setting | Value |
+|---|---|
+| SMTP server | `127.0.0.1` |
+| Port | `25` |
+| SMTP username/password | None |
+| From address | The configured sending mailbox |
+
+The local connection needs no login; Postfix handles OAuth and verified TLS upstream.
+Applications on other servers cannot connect to this localhost-only relay.
+
+## Everyday commands
+
+**Check service and queued mail:**
 
 ```bash
+bash smtp-oauth-deploy.sh status
+postqueue -p
+journalctl -u postfix --since '10 minutes ago' --no-pager
+```
+
+If sending fails, check the reported error and network access. Ask the email
+administrator to check secret expiry, mailbox access and SMTP AUTH policy.
+Do not disable TLS checks or SELinux to clear an error.
+
+**Replace an expiring secret:** ask the administrator for a replacement, edit the
+private JSON, then run these commands. Keep the old secret valid until the test passes.
+
+```bash
+vi /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
 ```
 
-Keep the previous secret valid until verification succeeds. The application obtains
-new access tokens on demand; Postfix retains failed mail for its ordinary queue retry.
-No timer is required. Monitor the queue, service health and **client secret expiry**.
+**Recover an interrupted credential import:**
 
 ```bash
-bash smtp-oauth-deploy.sh status
-postqueue -p
 bash smtp-oauth-deploy.sh recover-import
+bash smtp-oauth-deploy.sh status
 ```
 
-`recover-import` is only for an interrupted import. It restores the protected prior
-credentials or resumes after interrupted preparation. Never print runtime token
-files. If a crash leaves `token.json.new`, stop Postfix, remove only that temporary
-file, then start Postfix; the old atomic cache remains intact:
+If recovery fails, retain `/var/lib/smtp-oauth-cli` and resolve the reported error.
+
+**Uninstall:** stop application submissions first. Wait for `Mail queue is empty`.
 
 ```bash
-systemctl stop postfix
-rm -f /var/spool/postfix/smtp-oauth-cli/token.json.new
-systemctl start postfix
-```
-
-For failed installation or removal, retain `/var/lib/smtp-oauth-cli` and rerun
-uninstall after correcting the reported error. Configuration drift blocks destructive
-recovery: review and restore the recorded settings first. Versions 2.0.0/2.0.1/2.1.0
-are accepted for status/removal only; retain their original script and credential
-backups, particularly if a delegated grant had rotated during a failed import.
-This release cannot recover a refresh grant that an older script already deleted.
-The older `/var/lib/smtp-oauth-deploy` layout requires its original removal script.
-
-```bash
+postqueue -p
 bash smtp-oauth-deploy.sh uninstall
 ```
 
-Uninstall restores prior managed settings and service state; it preserves packages,
-the mail queue and tenant authorization. Pause submissions and drain the queue before
-migration/removal so queued mail is not sent using restored settings. Review retained
-private backups and revoke unused secrets through the administrator after success.
+Expect `Removed. Prior settings/service restored.` Packages and tenant permissions remain.
 
-## Email administrator reference and lab qualification
+## Manual QA checklist
 
-This section is for the **client email administrator** or the administrator of your
-isolated test tenant. Linux operators can use the supplied configuration file and
-the deployment/test steps above; they do not need to run these Microsoft commands.
+Use a disposable test server. Record the OS version and results for each platform.
 
-Obtain the responsible tenant administrator's approval for application-only SMTP
-and the mailbox scope before running these commands. A local administrator in a
-centrally managed tenant may need the service provider to register the application
-and grant access. This guide targets commercial Microsoft 365; approval in one
-tenant does not establish compatibility with every managed service or cloud.
-If only Graph or delegated SMTP is approved, choose an appropriate separate design;
-do not silently substitute either into this application-only SMTP workflow.
+- [ ] Install, check status, and confirm only `127.0.0.1:25` listens (`ss -ltn 'sport = :25'`).
+- [ ] Run both send tests above; confirm receipt and token renewal.
+- [ ] Reboot, then repeat status and the renewal/send test.
+- [ ] Import a separate JSON copy with an invalid secret: import must fail and the working setup must still send.
+- [ ] Simulate a network failure in the lab: mail must stay queued. Restore connectivity, run `postqueue -f`, and confirm delivery of the queued message.
+- [ ] Interrupt an import on a disposable VM snapshot; `recover-import` must restore working sending.
+- [ ] With SELinux enforcing, check `ausearch -m AVC -ts recent` for unexplained denials. Check logs contain no secrets.
+- [ ] Uninstall with an empty queue; confirm the previous Postfix settings and service state return.
 
-For a tenant that approves this route, use **Exchange Application RBAC only**. Do not add the Entra
-`SMTP.SendAsApp` API permission/claim or combine this with classic mailbox permission
-grants. Microsoft documents that the claim activates a different permission check.
-The administrator signs in using an approved management workstation; there is no
-mailbox sign-in or browser on the Linux relay.
+## Email administrator: Microsoft setup
 
-1. Register a single-tenant Entra application. Record its application/client ID and
-   tenant GUID. Create a client secret and record its **value** and expiration.
-   Do not enable public-client flows or add delegated permissions.
-2. Record the **Enterprise Application service principal object ID**. This is not
-   the App Registration object ID.
-3. In an authorized Exchange Online PowerShell session, replace the example values
-   and register the service principal. Scope access to the one mailbox:
+These steps belong to the **email administrator**, using their workstation.
+The Linux operator only needs the completed JSON.
 
-```powershell
-$AppId = 'REPLACE_WITH_APPLICATION_GUID'
-$EnterpriseObjectId = 'REPLACE_WITH_ENTERPRISE_APPLICATION_OBJECT_GUID'
-$Mailbox = 'relay@example.com'
-New-ServicePrincipal -AppId $AppId -ObjectId $EnterpriseObjectId -DisplayName 'SMTP relay'
-New-ManagementScope -Name 'SMTP relay mailbox' -RecipientRestrictionFilter "PrimarySmtpAddress -eq '$Mailbox'"
-New-ManagementRoleAssignment -Name 'SMTP relay send' -Role 'Application SMTP.SendAsApp' -App $AppId -CustomResourceScope 'SMTP relay mailbox'
-Test-ServicePrincipalAuthorization -Identity $AppId -Resource $Mailbox
-```
+1. In **Entra admin center > App registrations > New registration**, create a
+   single-tenant application. Record its application ID and directory/tenant ID.
+2. Open **Certificates & secrets > Client secrets > New client secret**. Record
+   its value, expiry date and renewal owner.
+3. Open **Enterprise applications**, select the application, and record its object ID.
+   This is different from the App Registration object ID.
+4. Follow Microsoft's [SMTP Application RBAC instructions](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding):
+   register the Exchange service principal using the Enterprise Application object ID,
+   and assign **Application SMTP.SendAsApp** scoped to the sending mailbox.
+   Use this RBAC route only; do not add the Entra `SMTP.SendAsApp` API permission.
+5. Verify that this mailbox is in scope, other mailboxes are excluded, and SMTP AUTH
+   is allowed by approved tenant policy. Supply the completed JSON securely.
 
-Check that the authorized mailbox is in scope and a different mailbox is out of
-scope. Resolve existing application grants before reuse; a fresh dedicated application
-avoids broader inherited access. Allow policy propagation before SMTP testing.
+If the tenant blocks this method, stop and agree another design. Do not disable
+Security Defaults or weaken tenant-wide protection to make the script work.
 
-SMTP AUTH must be permitted under the tenant’s approved policy for this mailbox.
-Review its effective settings and authentication policy; **do not disable Security
-Defaults or weaken tenant-wide controls to make this script work**. If the security
-baseline forbids SMTP AUTH, this relay design requires an administrator-approved
-alternative. The script performs no tenant changes.
+## Lab: Microsoft 365 Business Basic trial
 
-Deliver the five-field JSON through a secure channel and record the secret renewal
-owner/date. The native plugin requests the tenant-specific v2 endpoint using
-`client_credentials`, scope `https://outlook.office365.com/.default`. SMTP identity
-is the configured sending mailbox. Access-token acquisition does not establish
-Exchange authorization; run the delivery tests.
+Start the one-month trial **after the Linux package is ready**. A payment card is
+required; turn off renewal to avoid charges. See Microsoft's [trial guide](https://learn.microsoft.com/en-gb/microsoft-365/commerce/try-or-buy-microsoft-365?view=o365-worldwide).
 
-Sources: [Microsoft SMTP App RBAC onboarding](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding),
-[SMTP OAuth and application tokens](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth).
-Verified against these pages on 2026-11-02.
+On your workstation, as the lab's email administrator:
 
-## Manual platform QA checklist
+1. Create the Business Basic trial tenant. Use its `yourlab.onmicrosoft.com` domain;
+   you do not need to buy a domain.
+2. In **Microsoft 365 admin center > Billing > Your products**, select the trial
+   and turn **recurring billing OFF**. Record the expiry date.
+3. In **Users > Active users**, create `relay@yourlab.onmicrosoft.com` and assign
+   a Business Basic license with Exchange Online enabled. Wait for the mailbox.
+4. Complete the email-administrator steps above and fill in the JSON for this mailbox.
+5. Check SMTP AUTH policy before proceeding. Business Basic does not guarantee
+   this flow is allowed: if Security Defaults blocks SMTP AUTH, stop for an
+   administrator-approved solution. Do not turn it off just for testing.
 
-Repeat the walkthrough below on each intended distribution/version before rollout:
+On Linux, follow steps 2–6 and the manual QA checklist. Use your own approved inbox
+as the recipient. After QA, remove unused test credentials and recheck that renewal is off.
 
-- Install and send successfully, including forced token renewal.
-- Reboot and send again.
-- Reject bad credentials; recover from network failure and interrupted import.
-- Keep mail queued until delivery succeeds; check logs contain no secrets.
-- Run SELinux enforcing, check for denials, and confirm only localhost listens.
-- Uninstall and confirm the previous configuration and service state return.
-
-Record the platform, package version and results. Live tenant and RHEL qualification
-remain pending; container builds alone do not establish production readiness.
-
-## CLI QA walkthrough (isolated test host)
-
-Run as root from the approved checkout. Replace the approved test recipient in the
-commands below. These tests send mail and interrupt service; run only with explicit
-recipient/tenant permission, stopped application submissions and a disposable host.
-Use a commercial Microsoft 365 test tenant with approved application-only SMTP
-permissions. Final acceptance must also run in the intended sending tenant.
-
-1. Follow the deployment steps above installation, then run:
-
-```bash
-bash smtp-oauth-deploy.sh status
-ss -ltn 'sport = :25'
-postqueue -p
-bash smtp-oauth-deploy.sh test --recipient operator@example.com
-bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
-```
-
-Pass: status exits 0, only `127.0.0.1:25` listens, both sends print `RELAY ACCEPTED`
-with queue IDs, forced renewal reports a token-file update, and the recipient
-confirms both messages. A queued ID alone is **not** a pass.
-
-2. Reboot and check persistence:
-
-```bash
-reboot
-# Reconnect, return to the approved checkout, then:
-systemctl is-active postfix
-bash smtp-oauth-deploy.sh status
-bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
-```
-
-Pass: service active, status exit 0, native renewal and upstream acceptance observed.
-
-3. Test bad credentials without destroying the working credential:
-
-```bash
-umask 077
-jq '.client_secret="deliberately-invalid-qa-secret"' /root/smtp-oauth/client.json > /root/smtp-oauth/bad.json
-bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/bad.json --yes
-echo "exit=$?"
-bash smtp-oauth-deploy.sh status
-rm -f /root/smtp-oauth/bad.json
-```
-
-Pass: import exits nonzero, reports a generic token failure without secret contents,
-status still succeeds, and a normal send still works. Invalid credentials must never
-replace active configuration.
-
-4. Test unavailable token access using a temporary loopback proxy on the disposable
-host. First confirm port 9 is unused (`ss -ltn 'sport = :9'` must show no listener).
-Use a copied QA credential only; these commands test preactivation failure without
-editing firewall rules or the live plugin configuration:
-
-```bash
-HTTPS_PROXY=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy= \
-  bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json --yes
-echo "exit=$?"
-bash smtp-oauth-deploy.sh status
-```
-
-Pass: bounded nonzero failure, no activation, existing status succeeds. For **runtime
-queue retry**, separately use the lab's approved network fault injection to block
-only token-endpoint HTTPS from Postfix, then run the forced-renewal send. Expect
-nonzero/no `RELAY ACCEPTED`, deferred mail in `postqueue -p` and no secret leakage.
-Restore lab connectivity, then:
-
-```bash
-postqueue -f
-postqueue -p
-journalctl -t postfix/smtp --since '10 minutes ago' --no-pager
-```
-
-Pass: the **same** recorded queue ID reaches upstream `status=sent`; do not submit a
-replacement and call that recovery. Actual queue-failure testing is not covered by
-the temporary proxy preactivation test.
-
-5. Test interruption recovery on a disposable VM snapshot: interrupt an import
-process during preparation and during file activation using the lab harness. Then:
-
-```bash
-bash smtp-oauth-deploy.sh status
-bash smtp-oauth-deploy.sh recover-import --yes
-bash smtp-oauth-deploy.sh status
-bash smtp-oauth-deploy.sh test --recipient operator@example.com
-```
-
-Pass: an interruption is diagnosed, recovery restores the previous known-good
-credentials, status succeeds and sending works. The automated mock tests also check
-that recovery failure retains its pending marker. Do not kill random production
-processes or edit the recovery manifest to simulate this.
-
-6. With submissions paused and the queue empty:
-
-```bash
-postqueue -p
-bash smtp-oauth-deploy.sh uninstall --yes
-systemctl is-active postfix
-postconf -n
-```
-
-Pass: prior recorded settings and prior service state restored; managed state,
-credential maps and token directory removed; queue and packages preserved. Compare
-to the baseline captured before installation. A previously stopped service should
-be stopped again. Inspect SELinux AVCs throughout (`ausearch -m AVC -ts recent`);
-unexplained denials are a failure, not a reason to set permissive mode.
-
-## Business Basic trial lab — selected route
-
-Use a **Microsoft 365 Business Basic one-month trial** for live QA. Start it only
-after the matching EL package is ready, so packaging delays do not consume trial
-days. Local compilation/mocked tests on an existing Linux VM require no subscription.
-A payment card is required for the trial; it becomes paid automatically unless
-recurring billing is disabled. We do not create accounts or start a purchase for you.
-See Microsoft's [trial and cancellation guide](https://learn.microsoft.com/en-gb/microsoft-365/commerce/try-or-buy-microsoft-365?view=o365-worldwide).
-
-On your **workstation browser**, as the test tenant administrator:
-
-1. Select the Business Basic trial and complete tenant provisioning. Use the supplied
-   `yourlab.onmicrosoft.com` domain; there is no need to buy or connect a domain.
-2. In **Billing > Your products**, select the trial and turn **recurring billing OFF**.
-   Verify that renewal is disabled, record the expiry date, and retain the confirmation.
-3. In **Users > Active users**, create `relay@yourlab.onmicrosoft.com` and assign a
-   Business Basic license with Exchange Online enabled. Wait for its mailbox to be
-   provisioned. Use your own approved inbox as the QA recipient.
-4. Complete the application registration, secret and mailbox-scoped RBAC procedure
-   above in this **test tenant**. Record the tenant/application IDs, Enterprise
-   Application object ID, secret value and secret expiry. No sending-mailbox login
-   is needed for this application-only candidate. The administrator still signs in.
-5. Confirm approved SMTP AUTH policy. If the trial tenant's security baseline blocks
-   it, stop and resolve the design/policy with the administrator; do not disable
-   tenant-wide Security Defaults simply to make the test pass.
-
-Download the matching QA bundle and install its RPM and prerequisites as described
-above. On the **Linux test VM**, prepare the private JSON:
-
-```bash
-install -d -m 700 /root/smtp-oauth
-install -m 600 m365-client-template.json /root/smtp-oauth/client.json
-vi /root/smtp-oauth/client.json
-bash smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
-bash smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
-bash smtp-oauth-deploy.sh status
-```
-
-Enter `relay@yourlab.onmicrosoft.com`, the trial tenant GUID, application GUID and
-secret **value** in the JSON. Pass evidence: `check` reports credential structure and
-local prerequisites passed; `install` reports application token request passed and
-installed; `status` exits 0. An empty cache before the first SMTP authentication is
-normal. Keep credentials off command lines and out of support transcripts.
-
-Run walkthrough steps 1–6 above for actual sending, native reacquisition, reboot,
-failed credentials/network, interrupted import recovery and uninstall. Record exit
-codes and queue IDs; native/mock tests are separate from live SMTP evidence. Remove
-unused test application credentials through the tenant administrator after QA, and
-recheck recurring billing is off before leaving the trial.
-
-This is a time-limited **commercial Microsoft 365 lab**, not a permanent free tenant
-or an exact replica of every managed tenant. It tests the app-only candidate; final
-acceptance still requires the intended sending tenant and its approved permissions.
-Personal Outlook.com is not an equivalent lab.
+---
+Main contains only this guide, the script and the JSON template.
+[Maintainer source, license and tests](https://github.com/marmar-2401/smtp-oauth-cli/tree/maintenance/m365-build)
+are kept separately; operators do not need them.
