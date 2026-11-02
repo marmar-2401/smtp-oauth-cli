@@ -47,7 +47,9 @@ bash smtp-oauth-deploy.sh status
 
 The installer reads the Linux version and processor type, selects the matching
 package, and asks before installing required packages and configuring Postfix.
-It uses your enabled OS repositories. No GitHub login or browser is needed.
+It uses your enabled OS repositories. RHEL uses the matching Alma-built package;
+all dependencies must be available from your approved repositories. No GitHub login
+or browser is needed.
 An existing relay or stock OAuth plugin needs a planned migration first.
 
 Expect `Installed` and no errors from `status`. An empty token cache before the

@@ -97,13 +97,14 @@ detect_platform() {
 # An empty catalog fails before changing the host; never guess a download URL.
 declare -A APPROVED_PACKAGE_URLS=() APPROVED_PACKAGE_HASHES=()
 select_package_asset() {
-    local key="$PLATFORM_ID:$PLATFORM_MAJOR:$PLATFORM_ARCH"
+    local package_distro=$PLATFORM_ID key
+    # Same-major Alma binaries use the RHEL ABI; DNF must resolve every dependency.
+    # Never add Alma repositories to RHEL or force an unresolved package transaction.
+    [[ $package_distro != rhel ]] || package_distro=almalinux
+    key="$package_distro:$PLATFORM_MAJOR:$PLATFORM_ARCH"
     PACKAGE_URL=${APPROVED_PACKAGE_URLS[$key]:-}
     PACKAGE_SHA256=${APPROVED_PACKAGE_HASHES[$key]:-}
-    case "$PLATFORM_ID:$PLATFORM_MAJOR:$PLATFORM_ARCH" in
-        rhel:*) die 'Automatic RHEL packages are not available; obtain a separately validated package.' ;;
-        *:aarch64) die 'Automatic aarch64 packages are not available; obtain a matching tested package.' ;;
-    esac
+    [[ $PLATFORM_ARCH != aarch64 ]] || die 'Automatic aarch64 packages are not available; obtain a matching tested package.'
     [[ -n $PACKAGE_URL && -n $PACKAGE_SHA256 ]] || die "No approved public package is configured for $PLATFORM_ID $PLATFORM_MAJOR $PLATFORM_ARCH. Package publication is pending."
 }
 bootstrap_install_packages() {
@@ -142,7 +143,7 @@ bootstrap_install_packages() {
     dnf --setopt=timeout=30 --setopt=retries=2 install -y \
         postfix cyrus-sasl cyrus-sasl-lib cyrus-sasl-devel jq ca-certificates \
         util-linux iproute policycoreutils policycoreutils-python-utils "$package" || \
-        die 'Package installation failed. Check enabled repositories; existing packages were not automatically removed.'
+        die 'Package installation failed. Check that approved repositories supply the required dependencies. No repositories were enabled or package removals forced.'
 }
 prerequisites() {
     local command version
