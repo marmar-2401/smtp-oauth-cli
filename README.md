@@ -22,6 +22,69 @@ may require approval from their service provider. Complete [administrator and QA
 before production. It includes the Business Basic one-month trial lab; activate
 the trial after the matching package is ready.
 
+## Client intake — copy into a new setup task
+
+```text
+CLIENT OAUTH 2.0 EMAIL SETUP QUESTIONS
+
+Please have your email administrator complete this before we schedule setup.
+
+1. Which email service will we connect to?
+Microsoft 365, a centrally managed service, or another provider? Provide the
+approved SMTP hostname, port and any integration documentation.
+
+2. Who is the email administrator for this request?
+Provide their name, contact details and availability for setup/testing.
+Does a separate service provider need to approve the integration?
+
+3. Which sending mailbox should the application use?
+Provide its address, whether it is a user or shared mailbox, and any additional
+From addresses required.
+
+4. Which authentication method is approved?
+Can we use application-only OAuth (client credentials) without mailbox sign-in?
+If not, is delegated OAuth required, or is sending only allowed through Graph?
+
+5. Has the application been authorized to send as this mailbox?
+Confirm the approved SMTP application permissions/mailbox scope and whether
+SMTP AUTH is allowed under tenant policy. Do not change security policies
+solely to complete this questionnaire.
+
+6. What application configuration is available?
+Provide the tenant ID and application/client ID. Confirm whether authentication
+requires a client secret or certificate, its expiry date and the renewal owner.
+Do not include the secret, private key or tokens in your response.
+
+7. Which Linux server and applications will send mail?
+Provide hostname, distribution/version and architecture. Do applications run
+on that server, or submit from other systems? Does Postfix use another relay?
+
+8. Is the required outbound network access available?
+Confirm DNS and HTTPS access to the approved Microsoft token endpoint, plus
+SMTP access to the approved relay (normally TCP 443 and 587 for standard
+Microsoft 365). Note proxy, TLS inspection and firewall restrictions.
+
+9. What must the email service handle?
+Internal recipients, external recipients, or both? Include daily/peak volume,
+attachment sizes, and delivery or encryption requirements.
+
+10. How should we test and hand over?
+Provide an approved test recipient, change window, delivery-confirmation
+contact and approved secure method for transferring credentials. Use test
+messages without patient or other sensitive data.
+
+Do not paste passwords, client secrets, private keys or access/refresh tokens
+into this task. Transfer credentials only through the agreed secure channel.
+```
+
+**Operator go/no-go:** the current script handles commercial Microsoft 365,
+application-only OAuth with a client secret, one approved sending mailbox and local
+submission at `127.0.0.1:25`. Delegated-only, Graph-only, certificate-only, unsupported
+clouds, additional sending identities or remote submission require a separate
+review/design. Collecting those requirements does not mean this script supports them.
+Proceed only after the responsible administrator approves the applicable SMTP route
+and credentials can be transferred securely.
+
 ## 1. Obtain the approved package and configuration
 
 Have the administrator complete [administrator and QA instructions below](#administrator-setup-and-release-qualification) and securely supply the tenant
