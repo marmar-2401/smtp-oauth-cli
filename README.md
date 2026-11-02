@@ -2,22 +2,22 @@
 
 Postfix accepts application mail at **127.0.0.1:25** and sends it through
 `smtp.office365.com:587` with verified TLS and application-only OAuth.
-This **application-only candidate** needs no mailbox login, device code, browser,
-user refresh token or token daemon. It is not yet the selected NHSmail solution.
-A delegated workflow can also run on a headless Linux server when authorization
-occurs on a separate workstation; selecting that route requires provider and user
-confirmation. The original 2.1.0 workflow remains in Git at commit
-`4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`; this published workflow remains a QA candidate until live acceptance passes.
-The client’s administrator must authorize the application for one sending mailbox.
-This release supports a **client secret**; certificate credentials, personal
-Outlook.com and Gmail are outside this workflow.
+This application-only workflow needs no mailbox login, device code, browser,
+user refresh token or token daemon. Configure the tenant ID, application ID,
+client secret and one sending mailbox for each deployment. The tenant's
+administrator must approve the application and mailbox scope.
 
-**Qualification pending:** target platforms are RHEL, Oracle Linux and AlmaLinux
-8/9/10. Local native and mocked tests do not certify those systems, SELinux or a
-Microsoft tenant. The intended sender is an NHSmail mailbox. **NHSmail compatibility is unverified**
-until its authorized administrators approve application-only SMTP and the exact
-permission route. Generic Microsoft 365 support does not establish NHSmail support. Complete the checks in [ADMIN.md](ADMIN.md) before production. That guide includes
-the selected Business Basic one-month trial lab; activate it after packaging is ready.
+Scope: **commercial Microsoft 365**, client-secret authentication and one mailbox
+per dedicated Postfix instance. Certificate credentials, sovereign clouds, personal
+Outlook.com, Gmail and other providers are outside this release. The original 2.1.0
+delegated workflow remains in Git at commit `4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`.
+
+**QA candidate; live qualification pending:** target platforms are RHEL, Oracle
+Linux and AlmaLinux 8/9/10. Native tests and container package builds do not certify
+live systems, SELinux or a tenant's authorization policy. Centrally managed tenants
+may require approval from their service provider. Complete [ADMIN.md](ADMIN.md)
+before production. It includes the Business Basic one-month trial lab; activate
+the trial after the matching package is ready.
 
 ## 1. Obtain the approved package and configuration
 

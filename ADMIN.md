@@ -1,20 +1,12 @@
 # Administrator setup and release qualification
 
-**NHSmail gate:** NHSmail supplies the intended sending mailbox. This generic
-commercial Microsoft 365 configuration is not an approved NHSmail integration.
-Obtain official NHSmail application registration/SMTP permission approval first;
-a local client administrator may not have tenant-wide registration or role rights.
-Do not execute the following tenant commands without the responsible tenant
-administrator's authorization. If NHSmail permits only Graph application access
-or delegated SMTP, this design needs a scope decision; do not substitute either
-silently. No NHSmail policy or endpoint is inferred from third-party guidance. Public source
-review did not confirm NHSmail approval of client_credentials/SMTP.SendAsApp:
-**unverified, not declared unsupported**. Ask the NHSmail Local Administrator for
-written confirmation of the approved app-only SMTP registration/permission route.
-The supplied [6B article](https://6b.health/insight/integrating-with-nhsmail/) does not
-establish that approval; its offline_access discussion concerns delegated access.
-The [NHSmail backend application admin guide](https://support.nhs.net/knowledge-base/organisations-with-in-house-or-third-party-backend-applications-admin-guide/)
-redirected to the support portal during review.
+Obtain the responsible tenant administrator's approval for application-only SMTP
+and the mailbox scope before running these commands. A local administrator in a
+centrally managed tenant may need the service provider to register the application
+and grant access. This guide targets commercial Microsoft 365; approval in one
+tenant does not establish compatibility with every managed service or cloud.
+If only Graph or delegated SMTP is approved, choose an appropriate separate design;
+do not silently substitute either into this application-only SMTP workflow.
 
 For a tenant that approves this route, use **Exchange Application RBAC only**. Do not add the Entra
 `SMTP.SendAsApp` API permission/claim or combine this with classic mailbox permission
@@ -79,9 +71,8 @@ Do not treat a container build or mocked HTTP tests as these acceptance tests.
 Run as root from the approved checkout. Replace the approved test recipient in the
 commands below. These tests send mail and interrupt service; run only with explicit
 recipient/tenant permission, stopped application submissions and a disposable host.
-NHSmail compatibility is **pending** official application-only SMTP approval.
-NHSmail supplies the sending mailbox. This build uses commercial Microsoft 365
-endpoints; validate that endpoint and permission route with NHSmail first.
+Use a commercial Microsoft 365 test tenant with approved application-only SMTP
+permissions. Final acceptance must also run in the intended sending tenant.
 
 1. Follow README installation, then run:
 
@@ -233,6 +224,6 @@ unused test application credentials through the tenant administrator after QA, a
 recheck recurring billing is off before leaving the trial.
 
 This is a time-limited **commercial Microsoft 365 lab**, not a permanent free tenant
-or an exact NHSmail replica. It tests the app-only candidate; it does not select the
-final NHSmail grant or establish NHSmail permission approval. Final acceptance still
-requires the NHSmail sending tenant. Personal Outlook.com is not an equivalent lab.
+or an exact replica of every managed tenant. It tests the app-only candidate; final
+acceptance still requires the intended sending tenant and its approved permissions.
+Personal Outlook.com is not an equivalent lab.
