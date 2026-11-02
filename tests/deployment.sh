@@ -2,6 +2,19 @@
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 source smtp-oauth-cli/smtp-oauth-deploy.sh
+for distro in almalinux rocky rhel ol; do
+    for major in 8 9 10; do
+        for arch in x86_64 aarch64; do
+            platform_values "$distro" "$major.1" "$arch"
+            [[ $PLATFORM_ID == "$distro" && $PLATFORM_MAJOR == "$major" && $PLATFORM_ARCH == "$arch" ]]
+        done
+    done
+done
+for args in 'debian 9 x86_64' 'rocky 7 x86_64' 'ol 10 s390x'; do
+    # Intentional splitting of fixed test inputs.
+    # shellcheck disable=SC2086
+    if (platform_values $args) >/dev/null 2>&1; then exit 1; fi
+done
 sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox"' EXIT
 chmod 700 "$sandbox"

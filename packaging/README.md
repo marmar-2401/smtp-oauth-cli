@@ -6,7 +6,7 @@ This includes upstream curl lifetime fix `456c907bbc1a431af2726c1aac61bb6921c2e5
 `application-auth.patch` is our independent implementation, not PR 123.
 Upstream and this patch use Apache-2.0; see `UPSTREAM-LICENSE`.
 
-Build on an isolated **matching EL major version and architecture**, not on clients.
+Build on an isolated **matching distribution, EL major version and architecture**, not on clients.
 Enable your organization's approved repositories providing jsoncpp-devel and the
 other build dependencies. As root on the builder:
 
@@ -41,8 +41,30 @@ mirrors.almalinux.org, so the EL build matrix runs on GitHub-hosted runners. Che
 the exact commit’s Actions results; container build success does not establish
 live EL/SELinux/Microsoft acceptance, which remains a release gate.
 
-CI uploads a 30-day `qa-elMAJOR-x86_64` bundle only after package tests and installed
+CI uploads a 30-day `qa-DISTRO-elMAJOR-x86_64` bundle only after package tests and installed
 capability/integrity checks pass. Each contains binary/source RPMs, matching deployment
 files, `PROVENANCE.txt` (source commit, run, EL major, architecture and upstream pin),
 and `SHA256SUMS`. These are unsigned QA artifacts, not signed production releases.
 See the root README for GitHub Actions browser/CLI retrieval and host matching.
+
+## Distribution prerequisites (builders only)
+
+Common build commands above apply to AlmaLinux, Rocky Linux, RHEL and Oracle Linux
+8/9/10. Use approved BaseOS/AppStream equivalents and these development repositories:
+
+| Distribution | Additional repository setup |
+| --- | --- |
+| AlmaLinux / Rocky Linux 8 | EPEL and PowerTools (`dnf config-manager --set-enabled powertools`) |
+| AlmaLinux / Rocky Linux 9/10 | EPEL and CRB (`dnf config-manager --set-enabled crb`) |
+| Oracle Linux 8/9/10 | `olMAJOR_codeready_builder`; `oracle-epel-release-elMAJOR` from Oracle |
+| RHEL 8/9/10 | Subscription-backed BaseOS/AppStream and `codeready-builder-for-rhel-MAJOR-ARCH-rpms`; approved EPEL if required |
+
+Replace MAJOR/ARCH with the builder version/architecture. Do not enable unrelated
+repositories on client servers; make required runtime dependencies available through
+their approved package sources. CI uses official AlmaLinux, Rocky Linux and Oracle
+Linux containers for all three majors. RHEL subscription-backed builds are not
+available in this public CI and remain a separate acceptance requirement. All twelve
+OS/major combinations still need booted-VM, service and SELinux-enforcing qualification.
+Detection accepts only those four distribution IDs, majors 8/9/10, and x86_64/aarch64;
+package architecture/major must match. Postfix hash/lmdb support is selected at runtime
+and SASL helper/module paths come from RPM's libdir, not a hardcoded architecture.

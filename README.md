@@ -12,8 +12,8 @@ per dedicated Postfix instance. Certificate credentials, sovereign clouds, perso
 Outlook.com, Gmail and other providers are outside this release. The original 2.1.0
 delegated workflow remains in Git at commit `4a3fbbd84a6b213a5c1fc4470580cd4a0da5798f`.
 
-**QA candidate; live qualification pending:** target platforms are RHEL, Oracle
-Linux and AlmaLinux 8/9/10. Native tests and container package builds do not certify
+**QA candidate; live qualification pending:** target platforms are AlmaLinux, Rocky Linux,
+Red Hat Enterprise Linux and Oracle Linux, each at major 8/9/10. Native tests and container package builds do not certify
 live systems, SELinux or a tenant's authorization policy. Centrally managed tenants
 may require approval from their service provider. Complete [ADMIN.md](ADMIN.md)
 before production. It includes the Business Basic one-month trial lab; activate
@@ -28,22 +28,26 @@ this flow. Clients do not compile the plugin. Use an approved signed production
 RPM, or a matching **unsigned QA bundle** on a disposable lab host only.
 
 For QA, open this repository's **Actions > Local validation**, select a successful
-run for the exact commit you intend to test, and download `qa-el8-x86_64`,
-`qa-el9-x86_64` or `qa-el10-x86_64` under **Artifacts**. GitHub sign-in may be required;
+run for the exact commit you intend to test, and download the matching `qa-DISTRO-elMAJOR-x86_64` bundle
+(`DISTRO` is `alma`, `rocky` or `oracle`; `MAJOR` is 8, 9 or 10) under **Artifacts**. GitHub sign-in may be required;
 use your workstation browser, not the Linux server. Alternatively, on a workstation
 with GitHub CLI authenticated (replace `RUN_ID` and select the correct EL major):
 
 ```bash
-gh run download RUN_ID --repo marmar-2401/smtp-oauth-cli --name qa-el9-x86_64 --dir qa-el9
+gh run download RUN_ID --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
 cd qa-el9
 cat PROVENANCE.txt
 sha256sum -c SHA256SUMS
 scp -r . root@YOUR_LAB_HOST:/root/smtp-qa/
 ```
 
-Match `el_major` to `rpm -E '%{rhel}'`, architecture to `uname -m`, and source_commit
+Match `distribution` and `el_major` to `/etc/os-release`, architecture to `uname -m`,
+and source_commit
 to the selected successful run. Checksums detect corruption; **they are not package
-signatures or production approval**. Artifacts expire after 30 days. The bundle
+signatures or production approval**. Artifacts expire after 30 days. Current CI artifacts are x86_64 only. For aarch64,
+obtain a separately built and tested matching package; never install an x86_64 RPM.
+RHEL requires an approved subscription-backed build/validation; no RHEL-certified
+binary is claimed from another distribution's container. The bundle
 contains the matching deployment script, template, documentation, binary RPM and
 source RPM. On the lab host, run `cd /root/smtp-qa`, repeat `sha256sum -c SHA256SUMS`,
 then continue with prerequisites below. Install only the matching binary RPM,

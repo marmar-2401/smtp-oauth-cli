@@ -79,15 +79,29 @@ prepare_candidate() {
     fi
     say 'Application token request passed. Postfix acquires and caches tokens on demand; test verifies SMTP authorization separately.'
 }
+platform_values() {
+    PLATFORM_ID=$1; PLATFORM_MAJOR=${2%%.*}; PLATFORM_ARCH=$3
+    case "$PLATFORM_ID" in almalinux|rocky|rhel|ol) ;; *) die 'Supported distributions: AlmaLinux, Rocky Linux, RHEL and Oracle Linux.' ;; esac
+    case "$PLATFORM_MAJOR" in 8|9|10) ;; *) die 'Supported Enterprise Linux major versions: 8, 9 and 10.' ;; esac
+    case "$PLATFORM_ARCH" in x86_64|aarch64) ;; *) die 'Use a reviewed matching build for x86_64 or aarch64; other architectures are not supported.' ;; esac
+}
+detect_platform() {
+    local ID='' VERSION_ID=''
+    [[ -r /etc/os-release ]] || die 'Cannot identify the operating system.'
+    # This standard root-owned system file supplies distro and version only.
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    platform_values "$ID" "$VERSION_ID" "$(uname -m)"
+}
 prerequisites() {
-    local command version rhel
+    local command version
     for command in jq realpath stat flock timeout runuser curl rpm postconf postmap postfix postqueue systemctl sha256sum getenforce ss; do
         command -v "$command" >/dev/null || die "Missing prerequisite: $command. Install the documented OS packages first."
     done
-    rhel=$(rpm -E '%{rhel}')
-    [[ $rhel == 8 || $rhel == 9 || $rhel == 10 ]] || die 'This release targets Enterprise Linux 8, 9 and 10 only; qualify the actual host with the supplied lab.'
+    detect_platform
     version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Install the approved sasl-xoauth2-m365-cli RPM built from packaging/ first.'
-    [[ $version == 0.28-1.smtpcli* ]] || die 'This deployment requires the reviewed 0.28-1.smtpcli package.'
+    [[ $version == 0.28-1.smtpcli.el"$PLATFORM_MAJOR"* ]] || die 'This deployment requires the reviewed 0.28-1.smtpcli package for this EL major.'
+    [[ $(rpm -q --qf '%{ARCH}' sasl-xoauth2-m365-cli) == "$PLATFORM_ARCH" ]] || die 'Installed plugin architecture does not match this host.'
     CONFIG_TEST=$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config
     [[ -x $CONFIG_TEST ]] || die 'The packaged configuration checker is missing.'
     local binary

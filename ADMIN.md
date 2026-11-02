@@ -54,7 +54,8 @@ Verified against these pages on 2026-11-02.
 
 ## Release gate — still required
 
-On each supported distribution/major version and architecture, build the RPM and
+For each AlmaLinux, Rocky Linux, RHEL and Oracle Linux major 8/9/10 and intended
+architecture, build the matching RPM and
 run native/deployment tests. In disposable VMs with SELinux **enforcing**, check
 install, restart, reboot, labels/AVCs, drift rejection, import rollback at each
 interruption point, legacy uninstall and interrupted uninstall. Verify no external
