@@ -42,14 +42,11 @@ Please have your email administrator provide:
    secret, and grants sending access to the mailbox. Never paste the secret
    into this task.
 
-4. Confirmation that the Linux server can reach the approved Microsoft HTTPS
-   and SMTP endpoints on TCP 443 and 587.
-
-5. An email administrator contact and a test recipient who will confirm delivery.
+4. An email administrator contact and a test recipient who will confirm delivery.
    Identify who will renew the client secret before it expires.
 
 Your email team handles Microsoft 365 permissions and credentials.
-Our Linux team configures Postfix and verifies sending.
+Our Linux team checks the server network, configures Postfix and verifies sending.
 
 If application-only SMTP is not permitted, tell us before setup so we can review
 another supported method separately.
@@ -101,6 +98,12 @@ execute mutable `main` as root. Verify production package signatures through you
 release process. QA success is not production certification.
 
 All following commands run as **root**, from the approved repository or QA bundle directory.
+The **Linux/server team** owns network checks: DNS, correct system time, TLS/CA trust,
+routing/proxy rules, outbound HTTPS to the tenant token endpoint on TCP 443 and
+SMTP to `smtp.office365.com` on TCP 587. These are operator checks, not questions
+for the client's email administrator. The checks below validate local prerequisites,
+token acquisition and actual SMTP delivery without changing network security policy.
+
 Install OS prerequisites from your approved repositories:
 
 ```bash
