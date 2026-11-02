@@ -5,8 +5,8 @@ No browser or mailbox sign-in is needed on Linux.
 
 Use a dedicated server and one sending mailbox. This supports commercial Microsoft 365
 with a client secret, the application's private password. Target systems are AlmaLinux,
-Rocky Linux, RHEL and Oracle Linux 8/9/10. **Test on your platform and sending tenant
-before production; live testing and RHEL qualification are still pending.**
+Rocky Linux, RHEL and Oracle Linux 8/9/10. Use the QA checklist for your server and
+mailbox; live Microsoft sending and RHEL testing remain to be completed.
 
 ## 1. Ask the client email administrator
 
@@ -37,9 +37,9 @@ gh run download 41494598629 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9
 scp -r qa-el9/. root@YOUR_LAB_HOST:/root/smtp-qa/
 ```
 
-Replace `YOUR_LAB_HOST` with your server. Downloads are unsigned lab packages and
-expire after 30 days; a permanent release is pending. If missing, ask the maintainer.
-Current bundles are x86_64; RHEL and aarch64 need separately validated packages.
+Replace `YOUR_LAB_HOST` with your server. These test packages are available for
+30 days; ask the maintainer if a download is missing. Current bundles are x86_64.
+For RHEL or aarch64, ask for a matching tested package.
 
 ## 3. Prepare Linux
 
