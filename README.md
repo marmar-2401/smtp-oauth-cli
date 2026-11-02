@@ -23,12 +23,38 @@ the trial after the matching package is ready.
 
 Have the administrator complete [ADMIN.md](ADMIN.md) and securely supply the tenant
 ID, application ID, sending mailbox and **secret value**, with its expiration date.
-Build the separately named plugin RPM on an isolated matching EL builder using
-[packaging/README.md](packaging/README.md). Stock sasl-xoauth2 cannot do this flow.
-Use an approved, immutable release checkout; do not download and run mutable `main`
-as root. Verify the approved RPM signature and checksum through your release process.
+The separate `sasl-xoauth2-m365-cli` RPM is required: stock sasl-xoauth2 cannot do
+this flow. Clients do not compile the plugin. Use an approved signed production
+RPM, or a matching **unsigned QA bundle** on a disposable lab host only.
 
-All following commands run as **root**, from the approved repository directory.
+For QA, open this repository's **Actions > Local validation**, select a successful
+run for the exact commit you intend to test, and download `qa-el8-x86_64`,
+`qa-el9-x86_64` or `qa-el10-x86_64` under **Artifacts**. GitHub sign-in may be required;
+use your workstation browser, not the Linux server. Alternatively, on a workstation
+with GitHub CLI authenticated (replace `RUN_ID` and select the correct EL major):
+
+```bash
+gh run download RUN_ID --repo marmar-2401/smtp-oauth-cli --name qa-el9-x86_64 --dir qa-el9
+cd qa-el9
+cat PROVENANCE.txt
+sha256sum -c SHA256SUMS
+scp -r . root@YOUR_LAB_HOST:/root/smtp-qa/
+```
+
+Match `el_major` to `rpm -E '%{rhel}'`, architecture to `uname -m`, and source_commit
+to the selected successful run. Checksums detect corruption; **they are not package
+signatures or production approval**. Artifacts expire after 30 days. The bundle
+contains the matching deployment script, template, documentation, binary RPM and
+source RPM. On the lab host, run `cd /root/smtp-qa`, repeat `sha256sum -c SHA256SUMS`,
+then continue with prerequisites below. Install only the matching binary RPM,
+never the `.src.rpm`.
+
+For a controlled rebuild or production signing, use [packaging/README.md](packaging/README.md)
+in the approved source checkout. Use immutable reviewed inputs; do not download and
+execute mutable `main` as root. Verify production package signatures through your
+release process. QA success is not production certification.
+
+All following commands run as **root**, from the approved repository or QA bundle directory.
 Install OS prerequisites from your approved repositories:
 
 ```bash
@@ -39,10 +65,11 @@ On an existing delegated installation, first pause submissions, drain its queue 
 follow recovery below **before changing plugin packages**. The application RPM
 conflicts explicitly with stock `sasl-xoauth2`; review the package replacement
 transaction, including any dependents. This installer never removes packages.
-Install the approved RPM (replace the example path with the actual artifact):
+Install the matching RPM (EL9 QA example below; select EL8/10 as appropriate, or
+substitute the approved signed production RPM path):
 
 ```bash
-dnf install /root/releases/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el9.x86_64.rpm
+dnf install packages/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el9.x86_64.rpm
 install -d -m 700 /root/smtp-oauth
 install -m 600 smtp-oauth-cli/m365-client-template.json /root/smtp-oauth/client.json
 vi /root/smtp-oauth/client.json

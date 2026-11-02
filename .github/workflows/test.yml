@@ -34,3 +34,21 @@ jobs:
           rpm -V --nomtime --noconfig sasl-xoauth2-m365-cli
           helper="$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config"
           test "$("$helper" --application-auth-capability)" = smtp-oauth-cli-client-credentials-v1
+      - name: Prepare unsigned QA bundle
+        run: |
+          mkdir -p qa/packages qa/smtp-oauth-cli qa/packaging
+          cp /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm qa/packages/
+          cp /tmp/smtp-rpm-build/SRPMS/*.src.rpm qa/packages/
+          cp smtp-oauth-cli/smtp-oauth-deploy.sh smtp-oauth-cli/m365-client-template.json qa/smtp-oauth-cli/
+          cp README.md ADMIN.md qa/
+          cp packaging/README.md qa/packaging/
+          printf 'source_commit=%s\nrun_id=%s\nel_major=%s\narchitecture=%s\nunsigned_qa_only=true\nupstream_commit=35c732eca1eb67de04d417e77848a3326626fab2\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" '${{ matrix.version }}' "$(uname -m)" > qa/PROVENANCE.txt
+          cd qa
+          sha256sum PROVENANCE.txt README.md ADMIN.md smtp-oauth-cli/* packaging/* packages/* > SHA256SUMS
+      - name: Upload unsigned QA bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qa-el${{ matrix.version }}-x86_64
+          path: qa/
+          if-no-files-found: error
+          retention-days: 30

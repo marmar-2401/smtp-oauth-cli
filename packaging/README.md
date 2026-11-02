@@ -40,3 +40,9 @@ CI builds/testing do not deploy or send mail. The managed workspace cannot fetch
 mirrors.almalinux.org, so the EL build matrix runs on GitHub-hosted runners. Check
 the exact commit’s Actions results; container build success does not establish
 live EL/SELinux/Microsoft acceptance, which remains a release gate.
+
+CI uploads a 30-day `qa-elMAJOR-x86_64` bundle only after package tests and installed
+capability/integrity checks pass. Each contains binary/source RPMs, matching deployment
+files, `PROVENANCE.txt` (source commit, run, EL major, architecture and upstream pin),
+and `SHA256SUMS`. These are unsigned QA artifacts, not signed production releases.
+See the root README for GitHub Actions browser/CLI retrieval and host matching.

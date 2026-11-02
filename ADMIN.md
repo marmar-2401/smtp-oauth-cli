@@ -199,7 +199,9 @@ On your **workstation browser**, as the test tenant administrator:
    it, stop and resolve the design/policy with the administrator; do not disable
    tenant-wide Security Defaults simply to make the test pass.
 
-On the **Linux test VM**, use only CLI commands. Follow README's matching RPM and
+Download the matching unsigned QA artifact from a successful exact-commit Actions
+run as described in README, and verify its provenance and checksums. Do not compile
+on the client VM. On the **Linux test VM**, use only CLI commands. Follow README's matching RPM and
 OS prerequisite installation, then prepare the private JSON:
 
 ```bash
