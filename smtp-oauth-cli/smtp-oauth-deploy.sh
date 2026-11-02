@@ -86,7 +86,7 @@ platform_values() {
     case "$PLATFORM_ARCH" in x86_64|aarch64) ;; *) die 'Use a reviewed matching build for x86_64 or aarch64; other architectures are not supported.' ;; esac
 }
 detect_platform() {
-    local ID='' VERSION_ID=''
+    local ID='' VERSION_ID='' VERSION=''  # os-release must not replace script VERSION
     [[ -r /etc/os-release ]] || die 'Cannot identify the operating system.'
     # This standard root-owned system file supplies distro and version only.
     # shellcheck disable=SC1091

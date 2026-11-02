@@ -2,6 +2,12 @@
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 source smtp-oauth-cli/smtp-oauth-deploy.sh
+# os-release defines VERSION too; detection must preserve deployment schema version.
+(
+    platform_values() { :; }
+    detect_platform
+    [[ $VERSION == 3.0.0 ]]
+)
 for distro in almalinux rocky rhel ol; do
     for major in 8 9 10; do
         for arch in x86_64 aarch64; do
