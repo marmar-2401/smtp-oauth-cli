@@ -93,13 +93,286 @@ detect_platform() {
     . /etc/os-release
     platform_values "$ID" "$VERSION_ID" "$(uname -m)"
 }
+# Immutable, hash-checked source inputs; no Actions artifacts or release catalog.
+BUILD_SOURCE_COMMIT=81159a26c8a58602022f4582a26d8a64d87d104d
+UPSTREAM_COMMIT=35c732eca1eb67de04d417e77848a3326626fab2
+BUILD_STAGE='' BUILD_USER=''
+fetch_build_input() {
+    local url=$1 output=$2 expected=$3
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 120 --max-filesize 52428800 --max-redirs 3 \
+        --output "$output" "$url" || die 'Source download failed. Check approved HTTPS access and retry.'
+    [[ $(sha256sum "$output" | cut -d ' ' -f 1) == "$expected" ]] || die 'Build source failed its integrity check.'
+}
+cleanup_build() {
+    if [[ -n $BUILD_USER ]]; then
+        # Stop any interrupted build children before removing their private account.
+        pkill -KILL -u "$BUILD_USER" 2>/dev/null || :
+        userdel "$BUILD_USER" || { say "Cannot remove temporary build account $BUILD_USER; investigate." >&2; return 1; }
+        BUILD_USER=''
+    fi
+    if [[ -n $BUILD_STAGE ]]; then rm -rf -- "$BUILD_STAGE"; BUILD_STAGE=''; fi
+}
+build_plugin_package() {
+    local base archive top package srpm metadata archive_dir stamp
+    workdir
+    base="https://raw.githubusercontent.com/marmar-2401/smtp-oauth-cli/$BUILD_SOURCE_COMMIT/dev/packaging"
+    archive="sasl-xoauth2-$UPSTREAM_COMMIT.tar.gz"
+    fetch_build_input "$base/application-auth.patch" "$WORK/application-auth.patch" e812e1f01f0058cebec3177baee0333f8da4b9cb1f482d207e05e5c4431ecccd
+    fetch_build_input "$base/sasl-xoauth2-m365-cli.spec" "$WORK/plugin.spec" 3147e9bec9e23daa8975d1aa43d94f7c948c93b633708fbe49d991b8a081e7fb
+    fetch_build_input "$base/UPSTREAM-LICENSE" "$WORK/LICENSE" 638543982673e4a7b9cfec268f594c8efd11231c2d5fd966a226057251c79a3e
+    fetch_build_input "https://codeload.github.com/tarickb/sasl-xoauth2/tar.gz/$UPSTREAM_COMMIT" "$WORK/$archive" a7ca803a2f7fb40befa7e208886911d139c643f1a50031eabc0b78cac47dad33
+    BUILD_STAGE=$(mktemp -d /var/tmp/smtp-build.XXXXXXXX) || die 'Cannot create build staging.'
+    chmod 711 "$BUILD_STAGE"
+    BUILD_USER="smtpbuild_${BUILD_STAGE##*.}"
+    # Do not reuse an existing account if creation fails.
+    if ! useradd --system --no-create-home --no-user-group --gid "$(id -g nobody)" --home-dir "$BUILD_STAGE/build" --shell /sbin/nologin "$BUILD_USER"; then
+        BUILD_USER=''; die 'Cannot create temporary unprivileged build account.'
+    fi
+    top="$BUILD_STAGE/build"
+    mkdir -p "$top"/{SOURCES,SPECS,BUILD,RPMS,SRPMS,BUILDROOT}
+    cp "$WORK/$archive" "$WORK/application-auth.patch" "$top/SOURCES/"
+    cp "$WORK/plugin.spec" "$top/SPECS/plugin.spec"
+    chown -R "$BUILD_USER" "$top"
+    # Explicit dist macro ensures matching package identity on every supported EL distro.
+    if ! timeout --kill-after=30s 1800 runuser -u "$BUILD_USER" -- env HOME="$top" bash -c \
+        'cd "$1" && exec rpmbuild --define "_topdir $1" --define "dist .el$2" -ba "$1/SPECS/plugin.spec"' \
+        bash "$top" "$PLATFORM_MAJOR" > "$WORK/build.log" 2>&1; then
+        tail -n 60 "$WORK/build.log" >&2
+        die 'Plugin build/tests failed; relay configuration was not changed.'
+    fi
+    package="$top/RPMS/$PLATFORM_ARCH/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el$PLATFORM_MAJOR.$PLATFORM_ARCH.rpm"
+    srpm="$top/SRPMS/sasl-xoauth2-m365-cli-0.28-1.smtpcli.el$PLATFORM_MAJOR.src.rpm"
+    [[ -f $package && ! -L $package && -f $srpm && ! -L $srpm ]] || die 'Build did not produce the expected RPMs.'
+    install -m 600 "$package" "$WORK/application-plugin.rpm"
+    install -m 600 "$srpm" "$WORK/application-plugin.src.rpm"
+    cleanup_build || die 'Temporary builder cleanup failed.'
+    package="$WORK/application-plugin.rpm"
+    rpm -K "$package" >/dev/null || die 'Built RPM integrity check failed.'
+    metadata=$(rpm -qp --qf '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}' "$package") || die 'Built RPM cannot be inspected.'
+    [[ $metadata == "sasl-xoauth2-m365-cli 0.28-1.smtpcli.el$PLATFORM_MAJOR $PLATFORM_ARCH" ]] || die 'Built RPM does not match this platform.'
+    [[ -z $(rpm -qp --scripts "$package") ]] || die 'Unexpected RPM install scripts.'
+    # Retain source, license, tests/build log and provenance independently of relay state.
+    archive_dir=/var/lib/smtp-oauth-cli-builds
+    [[ ! -L $archive_dir ]] || die 'Build archive path is a symlink.'
+    if exists "$archive_dir"; then
+        [[ -d $archive_dir && $(stat -c %u "$archive_dir") == 0 && $(stat -c %a "$archive_dir") == 700 ]] || die 'Build archive must be a root-owned mode-700 directory.'
+    else
+        install -d -m 700 "$archive_dir"
+    fi
+    stamp=$(mktemp -d "$archive_dir/build.XXXXXXXX")
+    install -m 600 "$package" "$WORK/application-plugin.src.rpm" "$WORK/LICENSE" "$WORK/build.log" "$stamp/"
+    {
+        printf 'maintenance_commit=%s\nupstream_commit=%s\ndistro=%s\nel_major=%s\narchitecture=%s\n' "$BUILD_SOURCE_COMMIT" "$UPSTREAM_COMMIT" "$PLATFORM_ID" "$PLATFORM_MAJOR" "$PLATFORM_ARCH"
+        rpm -q gcc-c++ cmake rpm-build libcurl-devel jsoncpp-devel cyrus-sasl-devel
+        (cd "$WORK" && sha256sum "$archive" application-auth.patch plugin.spec LICENSE)
+    } > "$stamp/PROVENANCE.txt"
+    (cd "$stamp" && sha256sum ./* > SHA256SUMS)
+    say "Build source, license and provenance retained in $stamp."
+    dnf --setopt=timeout=30 --setopt=retries=2 install -y "$package" || die 'Local RPM installation failed; check approved dependencies.'
+}
+# DNF4 repository IDs verified against vendor documentation; live availability wins.
+REPO_SETUP=0
+DEPENDENCY_PACKAGES=() MISSING_PACKAGES=()
+declare -A REPO_STATES=()
+repository_profile() {
+    EPEL_REPO=epel; EPEL_RELEASE=epel-release
+    case "$PLATFORM_ID" in
+        almalinux|rocky)
+            BASE_REPO=baseos; APP_REPO=appstream
+            DEV_REPO=crb; [[ $PLATFORM_MAJOR != 8 ]] || DEV_REPO=powertools ;;
+        ol)
+            BASE_REPO="ol${PLATFORM_MAJOR}_baseos_latest"; APP_REPO="ol${PLATFORM_MAJOR}_appstream"
+            DEV_REPO="ol${PLATFORM_MAJOR}_codeready_builder"
+            EPEL_REPO="ol${PLATFORM_MAJOR}_developer_EPEL"; EPEL_RELEASE="oracle-epel-release-el$PLATFORM_MAJOR" ;;
+        rhel)
+            BASE_REPO="rhel-$PLATFORM_MAJOR-for-$PLATFORM_ARCH-baseos-rpms"
+            APP_REPO="rhel-$PLATFORM_MAJOR-for-$PLATFORM_ARCH-appstream-rpms"
+            DEV_REPO="codeready-builder-for-rhel-$PLATFORM_MAJOR-$PLATFORM_ARCH-rpms" ;;
+        *) die 'No verified repository profile for this distribution.' ;;
+    esac
+    DEPENDENCY_PACKAGES=(gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel
+        cyrus-sasl-devel rpm-build patch postfix cyrus-sasl cyrus-sasl-lib jq ca-certificates
+        util-linux iproute policycoreutils policycoreutils-python-utils shadow-utils procps-ng)
+    command -v curl >/dev/null || DEPENDENCY_PACKAGES+=(curl)
+}
+repo_dnf() {
+    dnf --setopt=timeout=30 --setopt=retries=2 --setopt='*.skip_if_unavailable=False' "$@"
+}
+repository_error() {
+    local log=$1
+    if grep -Eqi 'Could not resolve|Curl error \((5|6)\)|Name or service not known' "$log"; then
+        die 'Repository DNS/proxy-name resolution failed. Fix DNS or proxy configuration; this is not a missing package.'
+    elif grep -Eqi 'Curl error \((35|51|58|60|77)\)|certificate verify|SSL certificate' "$log"; then
+        die 'Repository TLS/certificate verification failed. Repair CA trust/time/proxy settings; TLS checks remain enabled.'
+    elif grep -Eqi '401|403|not entitled|not authorized|Unauthorized|Forbidden' "$log"; then
+        die 'Repository access denied. Ask the administrator to check repository authorization, RHEL content entitlement or proxy policy; no packages were classified as missing.'
+    elif grep -Eqi 'Curl error \((7|28)\)|timed out|Failed to connect|Network is unreachable' "$log"; then
+        die 'Repository network connection failed or timed out. Fix routing/proxy/firewall access before checking packages.'
+    else
+        die 'DNF repository metadata/configuration failed. Run dnf --refresh makecache to inspect the local error; package availability is unknown.'
+    fi
+}
+repository_scan() {
+    local id state
+    workdir
+    repo_dnf -q --cacheonly repolist --all > "$WORK/repos.txt" 2> "$WORK/repos.error" || repository_error "$WORK/repos.error"
+    REPO_STATES=()
+    while read -r id state; do REPO_STATES["$id"]=$state; done < <(
+        awk '$NF=="enabled" || $NF=="disabled" {print $1, $NF}' "$WORK/repos.txt")
+}
+report_repositories() {
+    local id
+    say "Repository check: $PLATFORM_ID $PLATFORM_MAJOR ($PLATFORM_ARCH)."
+    for id in "$BASE_REPO" "$APP_REPO" "$DEV_REPO"; do say "  $id: ${REPO_STATES[$id]:-missing}"; done
+    if [[ $PLATFORM_MAJOR != 10 ]]; then
+        say "  $EPEL_REPO: ${REPO_STATES[$EPEL_REPO]:-missing} (jsoncpp-devel on EL8/9)"
+    else
+        say '  EPEL is not required for these EL10 dependencies.'
+    fi
+    if [[ $PLATFORM_ID == rhel ]]; then
+        if ! command -v subscription-manager >/dev/null; then
+            say '  RHSM is unavailable; existing RHUI/Satellite/approved mirrors may still supply packages.'
+        elif subscription-manager identity > "$WORK/rhsm.txt" 2>&1; then
+            say '  RHEL identity: registered (repository access is checked separately; SCA Disabled is not an error).'
+        elif grep -Eqi 'not (yet )?registered' "$WORK/rhsm.txt"; then
+            say '  RHEL identity: unregistered. An administrator must handle registration if RHSM content is needed.'
+        else
+            say '  RHEL identity: could not verify; check subscription-manager identity locally.'
+        fi
+    fi
+}
+scan_dependencies() {
+    local package installed
+    MISSING_PACKAGES=()
+    # Never turn an inaccessible enabled repository into an apparent missing package.
+    repo_dnf -q --assumeno --refresh makecache > "$WORK/metadata.log" 2>&1 || repository_error "$WORK/metadata.log"
+    repo_dnf -q --assumeno --cacheonly repoquery --available --archlist="$PLATFORM_ARCH,noarch" \
+        --qf '%{name}' "${DEPENDENCY_PACKAGES[@]}" > "$WORK/available.txt" 2> "$WORK/query.error" || repository_error "$WORK/query.error"
+    for package in "${DEPENDENCY_PACKAGES[@]}"; do
+        installed=$(rpm -q --qf '%{ARCH}\n' "$package" 2>/dev/null) || installed=''
+        if ! grep -Eq "^($PLATFORM_ARCH|noarch)$" <<< "$installed" && ! grep -Fxq "$package" "$WORK/available.txt"; then
+            MISSING_PACKAGES+=("$package")
+        fi
+    done
+    if (( ${#MISSING_PACKAGES[@]} )); then
+        say "Unavailable from installed packages/enabled repositories: ${MISSING_PACKAGES[*]}"
+    else
+        say 'All direct build/runtime dependencies are installed or available. DNF will also resolve their dependencies before installation.'
+    fi
+}
+confirm_repository_change() {
+    # install --yes alone does not authorize repository changes.
+    local YES=$YES
+    (( REPO_SETUP )) || YES=0
+    say 'Repository changes persist after uninstall. Proceed only if allowed by your organization.'
+    if (( ! YES )) && [[ ! -t 0 ]]; then
+        die 'Repository changes need separate consent. Run repos --setup interactively, or repos --setup --yes after approving the proposed changes.'
+    fi
+    confirm "$1"
+}
+ensure_config_manager() {
+    if ! dnf config-manager --help >/dev/null 2>&1; then
+        say 'Repository setup also requires dnf-plugins-core from an already enabled repository.'
+        confirm_repository_change 'Install dnf-plugins-core to manage the selected repository?'
+        repo_dnf install -y dnf-plugins-core || die 'Cannot install dnf-plugins-core; ask the administrator to restore approved BaseOS/AppStream access.'
+    fi
+}
+enable_repository() {
+    local id=$1 state=${REPO_STATES[$1]:-missing}
+    [[ $state != enabled ]] || return 0
+    if [[ $PLATFORM_ID == rhel && $id != "$EPEL_REPO" ]]; then
+        command -v subscription-manager >/dev/null || die "Ask the RHEL/RHUI administrator to supply $id or its approved mirror. Registration is not automated."
+        subscription-manager identity > "$WORK/rhsm.txt" 2>&1 || die 'RHEL registration could not be confirmed. An administrator must resolve RHSM identity/content access; existing RHUI/mirror configuration is not replaced.'
+        subscription-manager repos --list > "$WORK/rhsm-repos.txt" 2> "$WORK/rhsm.error" || repository_error "$WORK/rhsm.error"
+        awk -F ': *' '/^Repo ID:/ {print $2}' "$WORK/rhsm-repos.txt" | grep -Fxq "$id" || \
+            die "RHEL does not offer $id to this system. Ask the administrator to check subscription/content entitlement, Satellite content views or RHUI; no registration or attachment was attempted."
+        confirm_repository_change "Enable RHEL repository $id using subscription-manager?"
+        subscription-manager repos --enable "$id" || die "Could not enable $id; ask the RHEL administrator to check content access."
+    else
+        [[ $state == disabled ]] || die "Repository $id is missing. Ask the administrator to restore the matching vendor repository definition or an approved mirror; no guessed repository URL was added."
+        confirm_repository_change "Enable configured repository $id?"
+        ensure_config_manager
+        repo_dnf config-manager --set-enabled "$id" || die "Could not enable repository $id."
+    fi
+    repository_scan
+    [[ ${REPO_STATES[$id]:-missing} == enabled ]] || die "Repository $id did not become enabled."
+}
+setup_epel() {
+    local source="$EPEL_RELEASE"
+    [[ $PLATFORM_MAJOR == 8 || $PLATFORM_MAJOR == 9 ]] || die 'EPEL setup is unnecessary for this EL major.'
+    if [[ ${REPO_STATES[$EPEL_REPO]:-missing} == missing ]]; then
+        if [[ $PLATFORM_ID == rhel ]]; then
+            source="https://dl.fedoraproject.org/pub/epel/epel-release-latest-$PLATFORM_MAJOR.noarch.rpm"
+        elif [[ $PLATFORM_ID == almalinux || $PLATFORM_ID == rocky ]]; then
+            # Prefer the vendor-distributed release package; never substitute another OS repository.
+            repo_dnf -q --assumeno repoquery --available --qf '%{name}' epel-release > "$WORK/epel-release.txt" 2> "$WORK/query.error" || repository_error "$WORK/query.error"
+            if ! grep -Fxq epel-release "$WORK/epel-release.txt"; then enable_repository extras; fi
+        fi
+        confirm_repository_change "Install $source to configure $EPEL_REPO for EL$PLATFORM_MAJOR?"
+        repo_dnf install -y "$source" || die "Could not install $EPEL_RELEASE. Check approved repository access/signature policy; no checks were disabled."
+        repository_scan
+    fi
+    enable_repository "$EPEL_REPO"
+}
+repository_preflight() {
+    local mode=${1:-check} package need_json=0 need_base=0
+    detect_platform
+    [[ $PLATFORM_ARCH == x86_64 ]] || die 'Automatic source-build repository checks currently support x86_64 only.'
+    command -v dnf >/dev/null && command -v rpm >/dev/null || die 'DNF4 and RPM are required for repository checks.'
+    repository_profile
+    repository_scan
+    report_repositories
+    scan_dependencies
+    (( ${#MISSING_PACKAGES[@]} )) || return 0
+    [[ $mode != check ]] || die 'Repository check failed. Run repos --setup to review proposed repository changes, or supply the listed packages through approved mirrors.'
+    for package in "${MISSING_PACKAGES[@]}"; do
+        if [[ $package == jsoncpp-devel ]]; then need_json=1; else need_base=1; fi
+    done
+    # Restore only configured disabled base repositories when core dependencies are absent.
+    # Missing or custom mirror definitions remain administrator-controlled.
+    if (( need_base )); then
+        for package in "$BASE_REPO" "$APP_REPO"; do
+            if [[ ${REPO_STATES[$package]:-missing} == disabled ]]; then enable_repository "$package"; fi
+        done
+    fi
+    if (( need_json )); then
+        enable_repository "$DEV_REPO"
+        [[ $PLATFORM_MAJOR == 10 ]] || setup_epel
+    fi
+    scan_dependencies
+    (( ${#MISSING_PACKAGES[@]} == 0 )) || die 'Dependencies remain unavailable after repository checks. Ask the administrator to inspect the listed packages, approved BaseOS/AppStream mirrors, version locks, exclusions and module filtering. No other repositories will be added.'
+}
+bootstrap_install_packages() {
+    local path
+    detect_platform
+    command -v dnf >/dev/null || die 'DNF is required to install the platform packages.'
+    command -v rpm >/dev/null || die 'RPM is required to inspect installed packages.'
+    rpm -q sasl-xoauth2-m365-cli >/dev/null 2>&1 && return 0
+    [[ $PLATFORM_ARCH == x86_64 ]] || die 'Automatic source builds are currently limited to x86_64; use a separately tested matching package for other architectures.'
+    rpm -q sasl-xoauth2 >/dev/null 2>&1 && die 'Stock sasl-xoauth2 is installed. Plan its replacement first; no packages were changed.'
+    for path in "$STATE" "$LEGACY_STATE" "$TOKENDIR" "$MAP" "$MAP.db" "$MAP.lmdb" "$CONFIG"; do
+        exists "$path" && die "Existing relay configuration at $path. Plan migration first; no packages were changed."
+    done
+    if command -v postconf >/dev/null; then
+        [[ -z $(postconf -h relayhost) ]] || die 'Postfix already has a relay configured. Plan migration first; no packages were changed.'
+    fi
+    protected_file "$INPUT"
+    say "Build the custom OAuth plugin for $PLATFORM_ID $PLATFORM_MAJOR ($PLATFORM_ARCH) from verified pinned source."
+    say 'This installs compiler/development and runtime packages from enabled repositories. Packages and build records remain after uninstall.'
+    confirm 'Install dependencies, build and test the plugin, then continue relay setup?'
+    repository_preflight setup
+    repo_dnf install -y "${DEPENDENCY_PACKAGES[@]}" || die 'Dependency transaction failed. Check the DNF error for conflicts, filtered versions, signatures or content access; no forced removals were requested.'
+    validate_config "$INPUT"
+    build_plugin_package
+}
 prerequisites() {
     local command version
     for command in jq realpath stat flock timeout runuser rpm postconf postmap postfix postqueue systemctl sha256sum getenforce ss; do
         command -v "$command" >/dev/null || die "Missing prerequisite: $command. Install the documented OS packages first."
     done
     detect_platform
-    version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Install the approved sasl-xoauth2-m365-cli RPM built from dev/packaging/ first.'
+    version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Run install to build the matching custom sasl-xoauth2-m365-cli RPM first.'
     [[ $version == 0.28-1.smtpcli.el"$PLATFORM_MAJOR"* ]] || die 'This deployment requires the reviewed 0.28-1.smtpcli package for this EL major.'
     [[ $(rpm -q --qf '%{ARCH}' sasl-xoauth2-m365-cli) == "$PLATFORM_ARCH" ]] || die 'Installed plugin architecture does not match this host.'
     CONFIG_TEST=$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config
@@ -385,6 +658,7 @@ cleanup() {
                 fi ;;
         esac
     fi
+    cleanup_build || rc=1
     if [[ -n $WORK ]]; then rm -rf -- "$WORK"; fi
     exit "$rc"
 }
@@ -558,6 +832,7 @@ recover_main() {
 usage() {
     cat <<'HELP'
 SMTP OAuth CLI 3.0.0 — Microsoft 365 application authentication.
+  repos [--setup [--yes]]
   check [--config JSON]
   install --config JSON [--yes]
   status
@@ -579,7 +854,7 @@ main() {
     (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || die 'Bash 4.4 or newer is required.'
     (( EUID == 0 )) || die 'Run as root.'
     shift
-    INPUT='' RECIPIENT='' FORCE_REFRESH=0
+    INPUT='' RECIPIENT='' FORCE_REFRESH=0 REPO_SETUP=0
     while (( $# )); do
         flag=$1; shift
         case "$cmd:$flag" in
@@ -588,12 +863,14 @@ main() {
                 case "$flag" in --config) INPUT=$1 ;; --recipient) RECIPIENT=$1 ;; esac
                 shift ;;
             install:--yes|import-token:--yes|test:--yes|uninstall:--yes|recover-import:--yes) YES=1 ;;
+            repos:--setup) REPO_SETUP=1 ;;
+            repos:--yes) YES=1 ;;
             test:--force-refresh) FORCE_REFRESH=1 ;;
             *) die "Unsupported option: $flag (use --help)." ;;
         esac
     done
-    case "$cmd" in check|install|status|test|import-token|uninstall|recover-import) ;; *) die 'Unknown command; use --help.' ;; esac
-    command -v jq >/dev/null || die 'Install jq before using this script.'
+    case "$cmd" in repos|check|install|status|test|import-token|uninstall|recover-import) ;; *) die 'Unknown command; use --help.' ;; esac
+    [[ $cmd != repos || $YES == 0 || $REPO_SETUP == 1 ]] || die 'repos --yes requires explicit --setup.'
     exists "$LEGACY_STATE" && die 'An older smtp-oauth-deploy installation/recovery path exists. Use its original script to uninstall it first; this release will not overwrite it.'
     [[ ! -L $LOCK ]] || die 'Lock path is a symlink.'
     if exists "$LOCK"; then
@@ -602,6 +879,15 @@ main() {
     exec 9>"$LOCK"; flock -n 9 || die 'Another SMTP OAuth operation is running.'
     SELF=$(realpath -e -- "${BASH_SOURCE[0]}")
     trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+    if [[ $cmd == repos ]]; then
+        if (( REPO_SETUP )); then repository_preflight setup; else repository_preflight check; fi
+        return
+    fi
+    if [[ $cmd == install ]]; then
+        [[ -n $INPUT ]] || die '--config is required.'
+        bootstrap_install_packages
+    fi
+    command -v jq >/dev/null || die 'Install jq before using this script.'
     case "$cmd" in
         recover-import) recover_main ;;
         check) prerequisites; if [[ -n $INPUT ]]; then validate_config "$INPUT"; say "Credential structure passed for $provider / $mailbox."; fi

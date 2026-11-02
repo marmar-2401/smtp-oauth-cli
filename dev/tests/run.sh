@@ -14,3 +14,5 @@ cmake --build "$build/build" --parallel 2
 bash -n "$repo/smtp-oauth-deploy.sh"
 shellcheck "$repo/smtp-oauth-deploy.sh" "$repo/dev/packaging/build-rpm.sh" "$repo/dev/tests/run.sh"
 bash "$repo/dev/tests/deployment.sh"
+
+bash "$repo/dev/tests/repositories.sh"
