@@ -1,7 +1,10 @@
 # Microsoft 365 SMTP relay — CLI only
 
 Start with `smtp-oauth-deploy.sh` and `m365-client-template.json` beside this guide.
-`dev/` contains maintainer-only build recipes and tests; `.github/` runs CI.
+Main contains only these three files. The required OAuth RPM is distributed separately.
+Build source, license, tests and CI are preserved on the
+[maintenance branch](https://github.com/marmar-2401/smtp-oauth-cli/tree/maintenance/m365-build);
+operators do not need that branch.
 
 Postfix accepts application mail at **127.0.0.1:25** and sends it through
 `smtp.office365.com:587` with verified TLS and application-only OAuth.
@@ -66,14 +69,15 @@ The separate `sasl-xoauth2-m365-cli` RPM is required: stock sasl-xoauth2 cannot 
 this flow. Clients do not compile the plugin. Use an approved signed production
 RPM, or a matching **unsigned QA bundle** on a disposable lab host only.
 
-For QA, open this repository's **Actions > Local validation**, select a successful
-run for the exact commit you intend to test, and download the matching `qa-DISTRO-elMAJOR-x86_64` bundle
+For QA, open the preserved [build run](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629)
+for source commit `81159a26c8a58602022f4582a26d8a64d87d104d`. Confirm the matching package
+job succeeded, then download the matching `qa-DISTRO-elMAJOR-x86_64` bundle
 (`DISTRO` is `alma`, `rocky` or `oracle`; `MAJOR` is 8, 9 or 10) under **Artifacts**. GitHub sign-in may be required;
 use your workstation browser, not the Linux server. Alternatively, on a workstation
-with GitHub CLI authenticated (replace `RUN_ID` and select the correct EL major):
+with GitHub CLI authenticated (select the correct distribution and EL major):
 
 ```bash
-gh run download RUN_ID --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
+gh run download 41494598629 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
 cd qa-el9
 cat PROVENANCE.txt
 sha256sum -c SHA256SUMS
@@ -83,7 +87,10 @@ scp -r . root@YOUR_LAB_HOST:/root/smtp-qa/
 Match `distribution` and `el_major` to `/etc/os-release`, architecture to `uname -m`,
 and source_commit
 to the selected successful run. Checksums detect corruption; **they are not package
-signatures or production approval**. Artifacts expire after 30 days. Current CI artifacts are x86_64 only. For aarch64,
+signatures or production approval**. These temporary QA artifacts expire after 30 days; download and retain the approved bundle now.
+A permanent package release is pending approval. If the artifacts have expired, obtain
+an approved package from the maintainer before setup; the three files alone cannot install
+the required plugin. Current CI artifacts are x86_64 only. For aarch64,
 obtain a separately built and tested matching package; never install an x86_64 RPM.
 RHEL requires an approved subscription-backed build/validation; no RHEL-certified
 binary is claimed from another distribution's container. The bundle
@@ -92,7 +99,7 @@ source RPM. On the lab host, run `cd /root/smtp-qa`, repeat `sha256sum -c SHA256
 then continue with prerequisites below. Install only the matching binary RPM,
 never the `.src.rpm`.
 
-For a controlled rebuild or production signing, use [dev/README.md](dev/README.md)
+For a controlled rebuild or production signing, use [maintainer build instructions](https://github.com/marmar-2401/smtp-oauth-cli/blob/81159a26c8a58602022f4582a26d8a64d87d104d/dev/README.md)
 in the approved source checkout. Use immutable reviewed inputs; do not download and
 execute mutable `main` as root. Verify production package signatures through your
 release process. QA success is not production certification.
