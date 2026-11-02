@@ -25,15 +25,16 @@ Copy this into the setup request:
 
 The special **`sasl-xoauth2-m365-cli` RPM is required**. The stock plugin cannot do this.
 
-On your workstation, open [QA downloads](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629).
+On your workstation, open [QA downloads](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41493182792).
 Under **Artifacts**, download a bundle matching your server, such as
 `qa-alma-el9-x86_64` for AlmaLinux 9. Choose a package whose job passed.
 Extract the ZIP and copy its contents to `/root/smtp-qa/` on Linux.
+Follow this current guide; the ZIP contains an older README.
 
 Or use GitHub CLI on your workstation (AlmaLinux 9 example):
 
 ```bash
-gh run download 41494598629 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
+gh run download 41493182792 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
 scp -r qa-el9/. root@YOUR_LAB_HOST:/root/smtp-qa/
 ```
 
