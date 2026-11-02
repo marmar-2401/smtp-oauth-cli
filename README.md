@@ -18,76 +18,52 @@ delegated workflow remains in Git at commit `4a3fbbd84a6b213a5c1fc4470580cd4a0da
 **QA candidate; live qualification pending:** target platforms are AlmaLinux, Rocky Linux,
 Red Hat Enterprise Linux and Oracle Linux, each at major 8/9/10. Native tests and container package builds do not certify
 live systems, SELinux or a tenant's authorization policy. Centrally managed tenants
-may require approval from their service provider. Complete [administrator and QA instructions below](#administrator-setup-and-release-qualification)
+may require approval from their service provider. Complete [administrator and QA instructions below](#email-administrator-reference-and-lab-qualification)
 before production. It includes the Business Basic one-month trial lab; activate
 the trial after the matching package is ready.
 
-## Client intake — copy into a new setup task
+## Client email setup requirements — copy into a new task
+
+Send the client email administrator the [configuration template](m365-client-template.json)
+and this checklist. You do not need to configure Microsoft 365 yourself.
 
 ```text
-CLIENT OAUTH 2.0 EMAIL SETUP QUESTIONS
+CLIENT EMAIL SETUP REQUIREMENTS
 
-Please have your email administrator complete this before we schedule setup.
+Please have your email administrator provide:
 
-1. Which email service will we connect to?
-Microsoft 365, a centrally managed service, or another provider? Provide the
-approved SMTP hostname, port and any integration documentation.
+1. The email address our application should send from.
 
-2. Who is the email administrator for this request?
-Provide their name, contact details and availability for setup/testing.
-Does a separate service provider need to approve the integration?
+2. Confirmation that your Microsoft 365 service permits application-only OAuth
+   SMTP sending, without signing in to the mailbox.
 
-3. Which sending mailbox should the application use?
-Provide its address, whether it is a user or shared mailbox, and any additional
-From addresses required.
+3. A completed client configuration template through an approved secure channel.
+   Your email administrator supplies the tenant ID, application ID and client
+   secret, and grants sending access to the mailbox. Never paste the secret
+   into this task.
 
-4. Which authentication method is approved?
-Can we use application-only OAuth (client credentials) without mailbox sign-in?
-If not, is delegated OAuth required, or is sending only allowed through Graph?
+4. Confirmation that the Linux server can reach the approved Microsoft HTTPS
+   and SMTP endpoints on TCP 443 and 587.
 
-5. Has the application been authorized to send as this mailbox?
-Confirm the approved SMTP application permissions/mailbox scope and whether
-SMTP AUTH is allowed under tenant policy. Do not change security policies
-solely to complete this questionnaire.
+5. An email administrator contact and a test recipient who will confirm delivery.
+   Identify who will renew the client secret before it expires.
 
-6. What application configuration is available?
-Provide the tenant ID and application/client ID. Confirm whether authentication
-requires a client secret or certificate, its expiry date and the renewal owner.
-Do not include the secret, private key or tokens in your response.
+Your email team handles Microsoft 365 permissions and credentials.
+Our Linux team configures Postfix and verifies sending.
 
-7. Which Linux server and applications will send mail?
-Provide hostname, distribution/version and architecture. Do applications run
-on that server, or submit from other systems? Does Postfix use another relay?
-
-8. Is the required outbound network access available?
-Confirm DNS and HTTPS access to the approved Microsoft token endpoint, plus
-SMTP access to the approved relay (normally TCP 443 and 587 for standard
-Microsoft 365). Note proxy, TLS inspection and firewall restrictions.
-
-9. What must the email service handle?
-Internal recipients, external recipients, or both? Include daily/peak volume,
-attachment sizes, and delivery or encryption requirements.
-
-10. How should we test and hand over?
-Provide an approved test recipient, change window, delivery-confirmation
-contact and approved secure method for transferring credentials. Use test
-messages without patient or other sensitive data.
-
-Do not paste passwords, client secrets, private keys or access/refresh tokens
-into this task. Transfer credentials only through the agreed secure channel.
+If application-only SMTP is not permitted, tell us before setup so we can review
+another supported method separately.
 ```
 
-**Operator go/no-go:** the current script handles commercial Microsoft 365,
-application-only OAuth with a client secret, one approved sending mailbox and local
-submission at `127.0.0.1:25`. Delegated-only, Graph-only, certificate-only, unsupported
-clouds, additional sending identities or remote submission require a separate
-review/design. Collecting those requirements does not mean this script supports them.
-Proceed only after the responsible administrator approves the applicable SMTP route
-and credentials can be transferred securely.
+The email administrator completes the existing JSON fields `provider`, `mailbox`,
+`tenant`, `client_id` and `client_secret`. Keep `provider` set to `m365`. Transfer the
+completed file securely; the Linux operator follows the deployment steps below.
+Detailed Microsoft steps are in the optional email-administrator reference later
+in this guide, not a prerequisite for the Linux operator to become a Windows admin.
 
 ## 1. Obtain the approved package and configuration
 
-Have the administrator complete [administrator and QA instructions below](#administrator-setup-and-release-qualification) and securely supply the tenant
+Have the administrator complete [administrator and QA instructions below](#email-administrator-reference-and-lab-qualification) and securely supply the tenant
 ID, application ID, sending mailbox and **secret value**, with its expiration date.
 The separate `sasl-xoauth2-m365-cli` RPM is required: stock sasl-xoauth2 cannot do
 this flow. Clients do not compile the plugin. Use an approved signed production
@@ -218,7 +194,11 @@ the mail queue and tenant authorization. Pause submissions and drain the queue b
 migration/removal so queued mail is not sent using restored settings. Review retained
 private backups and revoke unused secrets through the administrator after success.
 
-## Administrator setup and release qualification
+## Email administrator reference and lab qualification
+
+This section is for the **client email administrator** or the administrator of your
+isolated test tenant. Linux operators can use the supplied configuration file and
+the deployment/test steps above; they do not need to run these Microsoft commands.
 
 Obtain the responsible tenant administrator's approval for application-only SMTP
 and the mailbox scope before running these commands. A local administrator in a
