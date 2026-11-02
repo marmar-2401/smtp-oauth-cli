@@ -3,8 +3,8 @@
 Upstream: tarickb/sasl-xoauth2 `release-0.28`, commit
 `35c732eca1eb67de04d417e77848a3326626fab2`. The tag was verified against GitHub.
 This includes upstream curl lifetime fix `456c907bbc1a431af2726c1aac61bb6921c2e561`.
-`application-auth.patch` is our independent implementation, not PR 123.
-Upstream and this patch use Apache-2.0; see `UPSTREAM-LICENSE`.
+`packaging/application-auth.patch` is our independent implementation, not PR 123.
+Upstream and this patch use Apache-2.0; see `packaging/UPSTREAM-LICENSE`.
 
 Build on an isolated **matching distribution, EL major version and architecture**, not on clients.
 Enable your organization's approved repositories providing jsoncpp-devel and the
@@ -12,7 +12,7 @@ other build dependencies. As root on the builder:
 
 ```bash
 dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build /usr/bin/curl patch
-bash packaging/build-rpm.sh /root/smtp-rpm-build
+bash dev/packaging/build-rpm.sh /root/smtp-rpm-build
 ```
 
 The directory must not exist. The script downloads only the pinned source, verifies
@@ -33,7 +33,7 @@ HTTPS only, TLS verification, no redirects, 10/45 second connection/total timeou
 file lock, and atomic mode-600 cache replacement. No refresh-token field is used.
 Shared SASL token/request/response trace logging is redacted for both modes.
 
-Local tests: `bash tests/run.sh /absolute/path/to/pinned-source-archive.tar.gz` requires
+Local tests: `bash dev/tests/run.sh /absolute/path/to/pinned-source-archive.tar.gz` requires
 cmake, C++17, pkg-config, curl/jsoncpp/Cyrus development packages, jq and ShellCheck.
 Deployment tests run as root in an isolated container and mock host commands.
 CI builds/testing do not deploy or send mail. The managed workspace cannot fetch

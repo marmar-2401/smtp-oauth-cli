@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 022
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-root=${1:?Usage: bash packaging/build-rpm.sh /absolute/NEW-build-directory}
+root=${1:?Usage: bash dev/packaging/build-rpm.sh /absolute/NEW-build-directory}
 [[ $root == /* && ! -e $root ]] || { echo 'Use a new absolute output directory.' >&2; exit 1; }
 mkdir -p "$root"/{SOURCES,SPECS,BUILD,RPMS,SRPMS,BUILDROOT}
 commit=35c732eca1eb67de04d417e77848a3326626fab2

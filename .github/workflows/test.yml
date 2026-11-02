@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: sudo apt-get update && sudo apt-get install -y cmake g++ libcurl4-openssl-dev libsasl2-dev libjsoncpp-dev pkg-config shellcheck jq
       - run: curl --fail --location --proto '=https' --proto-redir '=https' https://codeload.github.com/tarickb/sasl-xoauth2/tar.gz/35c732eca1eb67de04d417e77848a3326626fab2 -o /tmp/upstream.tar.gz
-      - run: sudo bash tests/run.sh /tmp/upstream.tar.gz
+      - run: sudo bash dev/tests/run.sh /tmp/upstream.tar.gz
   el-package:
     timeout-minutes: 30
     runs-on: ubuntu-latest
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Build and test RPMs
         timeout-minutes: 10
-        run: bash packaging/build-rpm.sh /tmp/smtp-rpm-build
+        run: bash dev/packaging/build-rpm.sh /tmp/smtp-rpm-build
       - name: Verify installed package capability and integrity
         run: |
           dnf --setopt=timeout=30 --setopt=retries=2 install -y /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm
@@ -55,7 +55,7 @@ jobs:
       - name: Verify distro detection and Postfix map integration
         shell: bash
         run: |
-          source smtp-oauth-cli/smtp-oauth-deploy.sh
+          source smtp-oauth-deploy.sh
           detect_platform
           test "$PLATFORM_MAJOR" = '${{ matrix.version }}'
           test "$PLATFORM_ARCH" = x86_64
@@ -68,15 +68,15 @@ jobs:
           test "$(postmap -q test@example.com "$backend:/tmp/smtp-map-smoke")" = result
       - name: Prepare unsigned QA bundle
         run: |
-          mkdir -p qa/packages qa/smtp-oauth-cli qa/packaging
+          mkdir -p qa/packages qa/dev
           cp /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm qa/packages/
           cp /tmp/smtp-rpm-build/SRPMS/*.src.rpm qa/packages/
-          cp smtp-oauth-cli/smtp-oauth-deploy.sh smtp-oauth-cli/m365-client-template.json qa/smtp-oauth-cli/
-          cp README.md ADMIN.md qa/
-          cp packaging/README.md qa/packaging/
+          cp smtp-oauth-deploy.sh m365-client-template.json qa/
+          cp README.md qa/
+          cp dev/README.md qa/dev/
           printf 'source_commit=%s\nrun_id=%s\nel_major=%s\narchitecture=%s\ndistribution=${{ matrix.distro }}\nunsigned_qa_only=true\nupstream_commit=35c732eca1eb67de04d417e77848a3326626fab2\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" '${{ matrix.version }}' "$(uname -m)" > qa/PROVENANCE.txt
           cd qa
-          sha256sum PROVENANCE.txt README.md ADMIN.md smtp-oauth-cli/* packaging/* packages/* > SHA256SUMS
+          sha256sum PROVENANCE.txt README.md smtp-oauth-deploy.sh m365-client-template.json dev/README.md packages/* > SHA256SUMS
       - name: Upload unsigned QA bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

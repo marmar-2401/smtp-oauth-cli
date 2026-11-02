@@ -95,11 +95,11 @@ detect_platform() {
 }
 prerequisites() {
     local command version
-    for command in jq realpath stat flock timeout runuser curl rpm postconf postmap postfix postqueue systemctl sha256sum getenforce ss; do
+    for command in jq realpath stat flock timeout runuser rpm postconf postmap postfix postqueue systemctl sha256sum getenforce ss; do
         command -v "$command" >/dev/null || die "Missing prerequisite: $command. Install the documented OS packages first."
     done
     detect_platform
-    version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Install the approved sasl-xoauth2-m365-cli RPM built from packaging/ first.'
+    version=$(rpm -q --qf '%{VERSION}-%{RELEASE}' sasl-xoauth2-m365-cli 2>/dev/null) || die 'Install the approved sasl-xoauth2-m365-cli RPM built from dev/packaging/ first.'
     [[ $version == 0.28-1.smtpcli.el"$PLATFORM_MAJOR"* ]] || die 'This deployment requires the reviewed 0.28-1.smtpcli package for this EL major.'
     [[ $(rpm -q --qf '%{ARCH}' sasl-xoauth2-m365-cli) == "$PLATFORM_ARCH" ]] || die 'Installed plugin architecture does not match this host.'
     CONFIG_TEST=$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-cd "$(dirname "$0")/.."
-source smtp-oauth-cli/smtp-oauth-deploy.sh
+cd "$(dirname "$0")/../.."
+source smtp-oauth-deploy.sh
 # os-release defines VERSION too; detection must preserve deployment schema version.
 (
     platform_values() { :; }

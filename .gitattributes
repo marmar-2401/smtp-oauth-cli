@@ -1,1 +1,1 @@
-packaging/*.patch -whitespace
+dev/packaging/*.patch -whitespace
