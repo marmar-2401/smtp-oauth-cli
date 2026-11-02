@@ -45,17 +45,30 @@ bash smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh status
 ```
 
-**Package publication is pending.** A fresh server cannot complete installation yet:
-the installer stops when no approved package is available. Hosts with the matching
-custom `sasl-xoauth2-m365-cli` package and OS dependencies already installed can
-continue through the existing integrity and capability checks. The stock
-`sasl-xoauth2` plugin is not interchangeable.
+The installer asks before installing dependencies and building the custom OAuth
+plugin from pinned, hash-checked source. It builds and tests a native RPM as a
+temporary unprivileged user, then installs it with DNF. No GitHub Actions,
+release downloads, manual compilation, or GitHub login are needed. First install
+requires HTTPS access to `raw.githubusercontent.com` and `codeload.github.com`.
 
-Once verified packages are published and added to the installer catalog, it will
-select the matching Linux version and processor type and ask before installing.
-It uses only your enabled OS repositories; RHEL maps to the same-major Alma build
-and requires dependencies from your approved repositories. Automatic aarch64
-packages are not available. An existing relay needs a planned migration first.
+Only already enabled, approved repositories are used. They must supply compiler
+and development dependencies, including `jsoncpp-devel`, `libcurl-devel` and
+`cyrus-sasl-devel`. If a dependency is missing, ask the Linux administrator to
+provide it through approved development repositories: PowerTools/CRB for Alma/Rocky,
+CodeReady Builder for Oracle/RHEL, and EPEL where needed. RHEL requires suitable
+subscriptions. The installer never enables repositories or forces package removal.
+Local RPMs are unsigned; hosts requiring signed local packages need an approved
+signing process. Signature policy is not bypassed.
+
+Automatic builds are limited to x86_64 on the listed EL versions and build natively
+for the detected host. An already installed matching custom `sasl-xoauth2-m365-cli`
+package skips compilation and must pass integrity/capability checks. Stock
+`sasl-xoauth2` is not interchangeable; an existing plugin or relay needs a planned
+migration first.
+
+Compiler/development packages remain installed. Source RPMs, the license, build
+logs and provenance are retained in root-only `/var/lib/smtp-oauth-cli-builds`.
+A failed build leaves these installed dependencies but does not configure the relay.
 
 Expect `Installed` and no errors from `status`. An empty token cache before the
 first send is normal. Run later commands from `/root/smtp-oauth-cli`.
@@ -125,9 +138,15 @@ postqueue -p
 bash smtp-oauth-deploy.sh uninstall
 ```
 
-Expect `Removed. Prior settings/service restored.` Packages and tenant permissions remain.
+Expect `Removed. Prior settings/service restored.` Packages, build records and tenant permissions remain.
 
 ## Manual QA checklist
+
+The custom plugin is maintained from pinned upstream source, not vendor-certified.
+Earlier container builds passed for Alma/Rocky/Oracle 8/9/10 x86_64; the automatic
+on-server build path still needs platform acceptance. Direct RHEL, live Microsoft
+sending, reboot and SELinux validation remain required. No aarch64 build support
+is claimed. Source pins reproduce inputs, not necessarily byte-identical RPMs.
 
 Use a disposable test server. Record the OS version and results for each platform.
 
@@ -163,7 +182,7 @@ Security Defaults or weaken tenant-wide protection to make the script work.
 
 ## Lab: Microsoft 365 Business Basic trial
 
-Start the one-month trial **after the Linux package is ready**. A payment card is
+Start the one-month trial **after the Linux installation prerequisites are ready**. A payment card is
 required; turn off renewal to avoid charges. See Microsoft's [trial guide](https://learn.microsoft.com/en-gb/microsoft-365/commerce/try-or-buy-microsoft-365?view=o365-worldwide).
 
 On your workstation, as the lab's email administrator:
