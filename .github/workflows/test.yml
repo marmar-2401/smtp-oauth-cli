@@ -1,9 +1,13 @@
 name: Local validation
 on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   native-and-deployment:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -11,6 +15,7 @@ jobs:
       - run: curl --fail --location --proto '=https' --proto-redir '=https' https://codeload.github.com/tarickb/sasl-xoauth2/tar.gz/35c732eca1eb67de04d417e77848a3326626fab2 -o /tmp/upstream.tar.gz
       - run: sudo bash tests/run.sh /tmp/upstream.tar.gz
   el-package:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,26 +24,31 @@ jobs:
         version: ['8', '9', '10']
     container: ${{ matrix.distro == 'alma' && 'almalinux' || matrix.distro == 'rocky' && 'rockylinux/rockylinux' || 'oraclelinux' }}:${{ matrix.version }}
     steps:
-      - run: dnf install -y git dnf-plugins-core
+      - name: Install build bootstrap tools
+        timeout-minutes: 10
+        run: dnf --setopt=timeout=30 --setopt=retries=2 install -y git dnf-plugins-core
       - name: Configure distro build repositories
+        timeout-minutes: 12
         run: |
           if [ '${{ matrix.distro }}' = oracle ]; then
             dnf config-manager --set-enabled ol${{ matrix.version }}_codeready_builder
-            dnf install -y oracle-epel-release-el${{ matrix.version }}
+            dnf --setopt=timeout=30 --setopt=retries=2 install -y oracle-epel-release-el${{ matrix.version }}
           else
-            dnf install -y epel-release
+            dnf --setopt=timeout=30 --setopt=retries=2 install -y epel-release
             if [ '${{ matrix.version }}' = 8 ]; then
               dnf config-manager --set-enabled powertools
             else
               dnf config-manager --set-enabled crb
             fi
           fi
-          dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build /usr/bin/curl patch postfix jq util-linux iproute policycoreutils policycoreutils-python-utils
+          dnf --setopt=timeout=30 --setopt=retries=2 install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build /usr/bin/curl patch postfix jq util-linux iproute policycoreutils policycoreutils-python-utils
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - run: bash packaging/build-rpm.sh /tmp/smtp-rpm-build
+      - name: Build and test RPMs
+        timeout-minutes: 10
+        run: bash packaging/build-rpm.sh /tmp/smtp-rpm-build
       - name: Verify installed package capability and integrity
         run: |
-          dnf install -y /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm
+          dnf --setopt=timeout=30 --setopt=retries=2 install -y /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm
           rpm -V --nomtime --noconfig sasl-xoauth2-m365-cli
           helper="$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config"
           test "$("$helper" --application-auth-capability)" = smtp-oauth-cli-client-credentials-v1
