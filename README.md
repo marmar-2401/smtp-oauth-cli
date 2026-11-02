@@ -16,7 +16,8 @@ Outlook.com and Gmail are outside this workflow.
 8/9/10. Local native and mocked tests do not certify those systems, SELinux or a
 Microsoft tenant. The intended sender is an NHSmail mailbox. **NHSmail compatibility is unverified**
 until its authorized administrators approve application-only SMTP and the exact
-permission route. Generic Microsoft 365 support does not establish NHSmail support. Complete the checks in [ADMIN.md](ADMIN.md) before production.
+permission route. Generic Microsoft 365 support does not establish NHSmail support. Complete the checks in [ADMIN.md](ADMIN.md) before production. That guide includes
+the selected Business Basic one-month trial lab; activate it after packaging is ready.
 
 ## 1. Obtain the approved package and configuration
 

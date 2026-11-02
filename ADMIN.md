@@ -182,16 +182,57 @@ to the baseline captured before installation. A previously stopped service shoul
 be stopped again. Inspect SELinux AVCs throughout (`ausearch -m AVC -ts recent`);
 unexplained denials are a failure, not a reason to set permissive mode.
 
-## Low-cost QA lab
+## Business Basic trial lab — selected route
 
-Local compilation, mocked HTTP and deployment tests need no mailbox subscription
-and can run free on an existing Linux VM. Real Exchange OAuth/SMTP testing needs a
-licensed organizational test mailbox. Eligible members can use a Microsoft 365 E5
-[Developer Program sandbox](https://learn.microsoft.com/en-us/office/developer-program/microsoft-365-developer-program-faq);
-otherwise consider a time-limited Microsoft 365 Business Basic trial. Eligibility
-and signup terms apply; personal Outlook.com is not an equivalent test tenant.
-Microsoft's [current trial guide](https://learn.microsoft.com/en-gb/microsoft-365/commerce/try-or-buy-microsoft-365?view=o365-worldwide)
-describes a 30-day trial that converts to paid renewal unless recurring billing is
-turned off. Start the trial **after the package is ready** to preserve its test days.
-No permanent free tenant or exact NHSmail replica is promised. A commercial lab
-validates mechanics; final acceptance still requires the NHSmail sending tenant.
+Use a **Microsoft 365 Business Basic one-month trial** for live QA. Start it only
+after the matching EL package is ready, so packaging delays do not consume trial
+days. Local compilation/mocked tests on an existing Linux VM require no subscription.
+A payment card is required for the trial; it becomes paid automatically unless
+recurring billing is disabled. We do not create accounts or start a purchase for you.
+See Microsoft's [trial and cancellation guide](https://learn.microsoft.com/en-gb/microsoft-365/commerce/try-or-buy-microsoft-365?view=o365-worldwide).
+
+On your **workstation browser**, as the test tenant administrator:
+
+1. Select the Business Basic trial and complete tenant provisioning. Use the supplied
+   `yourlab.onmicrosoft.com` domain; there is no need to buy or connect a domain.
+2. In **Billing > Your products**, select the trial and turn **recurring billing OFF**.
+   Verify that renewal is disabled, record the expiry date, and retain the confirmation.
+3. In **Users > Active users**, create `relay@yourlab.onmicrosoft.com` and assign a
+   Business Basic license with Exchange Online enabled. Wait for its mailbox to be
+   provisioned. Use your own approved inbox as the QA recipient.
+4. Complete the application registration, secret and mailbox-scoped RBAC procedure
+   above in this **test tenant**. Record the tenant/application IDs, Enterprise
+   Application object ID, secret value and secret expiry. No sending-mailbox login
+   is needed for this application-only candidate. The administrator still signs in.
+5. Confirm approved SMTP AUTH policy. If the trial tenant's security baseline blocks
+   it, stop and resolve the design/policy with the administrator; do not disable
+   tenant-wide Security Defaults simply to make the test pass.
+
+On the **Linux test VM**, use only CLI commands. Follow README's matching RPM and
+OS prerequisite installation, then prepare the private JSON:
+
+```bash
+install -d -m 700 /root/smtp-oauth
+install -m 600 smtp-oauth-cli/m365-client-template.json /root/smtp-oauth/client.json
+vi /root/smtp-oauth/client.json
+bash smtp-oauth-cli/smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
+bash smtp-oauth-cli/smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
+bash smtp-oauth-cli/smtp-oauth-deploy.sh status
+```
+
+Enter `relay@yourlab.onmicrosoft.com`, the trial tenant GUID, application GUID and
+secret **value** in the JSON. Pass evidence: `check` reports credential structure and
+local prerequisites passed; `install` reports application token request passed and
+installed; `status` exits 0. An empty cache before the first SMTP authentication is
+normal. Keep credentials off command lines and out of support transcripts.
+
+Run walkthrough steps 1–6 above for actual sending, native reacquisition, reboot,
+failed credentials/network, interrupted import recovery and uninstall. Record exit
+codes and queue IDs; native/mock tests are separate from live SMTP evidence. Remove
+unused test application credentials through the tenant administrator after QA, and
+recheck recurring billing is off before leaving the trial.
+
+This is a time-limited **commercial Microsoft 365 lab**, not a permanent free tenant
+or an exact NHSmail replica. It tests the app-only candidate; it does not select the
+final NHSmail grant or establish NHSmail permission approval. Final acceptance still
+requires the NHSmail sending tenant. Personal Outlook.com is not an equivalent lab.
