@@ -28,3 +28,9 @@ jobs:
           dnf install -y gcc-c++ cmake make pkgconf-pkg-config libcurl-devel jsoncpp-devel cyrus-sasl-devel rpm-build /usr/bin/curl patch
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - run: bash packaging/build-rpm.sh /tmp/smtp-rpm-build
+      - name: Verify installed package capability and integrity
+        run: |
+          dnf install -y /tmp/smtp-rpm-build/RPMS/*/sasl-xoauth2-m365-cli-0.28-*.rpm
+          rpm -V --nomtime --noconfig sasl-xoauth2-m365-cli
+          helper="$(rpm --eval '%{_libdir}')/sasl-xoauth2/test-config"
+          test "$("$helper" --application-auth-capability)" = smtp-oauth-cli-client-credentials-v1
