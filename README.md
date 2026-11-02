@@ -45,12 +45,17 @@ bash smtp-oauth-deploy.sh install --config /root/smtp-oauth/client.json
 bash smtp-oauth-deploy.sh status
 ```
 
-The installer reads the Linux version and processor type, selects the matching
-package, and asks before installing required packages and configuring Postfix.
-It uses your enabled OS repositories. RHEL uses the matching Alma-built package;
-all dependencies must be available from your approved repositories. No GitHub login
-or browser is needed.
-An existing relay or stock OAuth plugin needs a planned migration first.
+**Package publication is pending.** A fresh server cannot complete installation yet:
+the installer stops when no approved package is available. Hosts with the matching
+custom `sasl-xoauth2-m365-cli` package and OS dependencies already installed can
+continue through the existing integrity and capability checks. The stock
+`sasl-xoauth2` plugin is not interchangeable.
+
+Once verified packages are published and added to the installer catalog, it will
+select the matching Linux version and processor type and ask before installing.
+It uses only your enabled OS repositories; RHEL maps to the same-major Alma build
+and requires dependencies from your approved repositories. Automatic aarch64
+packages are not available. An existing relay needs a planned migration first.
 
 Expect `Installed` and no errors from `status`. An empty token cache before the
 first send is normal. Run later commands from `/root/smtp-oauth-cli`.
