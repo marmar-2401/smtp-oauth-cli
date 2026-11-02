@@ -69,47 +69,32 @@ The separate `sasl-xoauth2-m365-cli` RPM is required: stock sasl-xoauth2 cannot 
 this flow. Clients do not compile the plugin. Use an approved signed production
 RPM, or a matching **unsigned QA bundle** on a disposable lab host only.
 
-For QA, open the preserved [build run](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629)
-for source commit `81159a26c8a58602022f4582a26d8a64d87d104d`. Confirm the matching package
-job succeeded, then download the matching `qa-DISTRO-elMAJOR-x86_64` bundle
-(`DISTRO` is `alma`, `rocky` or `oracle`; `MAJOR` is 8, 9 or 10) under **Artifacts**. GitHub sign-in may be required;
-use your workstation browser, not the Linux server. Alternatively, on a workstation
-with GitHub CLI authenticated (select the correct distribution and EL major):
+For QA, download the matching `qa-DISTRO-elMAJOR-x86_64` bundle from
+[this build's Artifacts](https://github.com/marmar-2401/smtp-oauth-cli/actions/runs/41494598629)
+on your workstation. Select `alma`, `rocky` or `oracle` and major `8`, `9` or `10`.
+Use a package whose build job passed. No compilation is needed on the server.
+
+GitHub CLI example for AlmaLinux 9:
 
 ```bash
 gh run download 41494598629 --repo marmar-2401/smtp-oauth-cli --name qa-alma-el9-x86_64 --dir qa-el9
-cd qa-el9
-cat PROVENANCE.txt
-sha256sum -c SHA256SUMS
-scp -r . root@YOUR_LAB_HOST:/root/smtp-qa/
+scp -r qa-el9/. root@YOUR_LAB_HOST:/root/smtp-qa/
 ```
 
-Match `distribution` and `el_major` to `/etc/os-release`, architecture to `uname -m`,
-and source_commit
-to the selected successful run. Checksums detect corruption; **they are not package
-signatures or production approval**. These temporary QA artifacts expire after 30 days; download and retain the approved bundle now.
-A permanent package release is pending approval. If the artifacts have expired, obtain
-an approved package from the maintainer before setup; the three files alone cannot install
-the required plugin. Current CI artifacts are x86_64 only. For aarch64,
-obtain a separately built and tested matching package; never install an x86_64 RPM.
-RHEL requires an approved subscription-backed build/validation; no RHEL-certified
-binary is claimed from another distribution's container. The bundle
-contains the matching deployment script, template, documentation, binary RPM and
-source RPM. On the lab host, run `cd /root/smtp-qa`, repeat `sha256sum -c SHA256SUMS`,
-then continue with prerequisites below. Install only the matching binary RPM,
-never the `.src.rpm`.
+These unsigned lab downloads expire after 30 days. A permanent package release is
+pending approval; if the download has expired, ask the maintainer for the package.
+Current packages are x86_64. RHEL and aarch64 need separately validated packages.
 
-For a controlled rebuild or production signing, use [maintainer build instructions](https://github.com/marmar-2401/smtp-oauth-cli/blob/81159a26c8a58602022f4582a26d8a64d87d104d/dev/README.md)
-in the approved source checkout. Use immutable reviewed inputs; do not download and
-execute mutable `main` as root. Verify production package signatures through your
-release process. QA success is not production certification.
+On the Linux server, run the following as **root**:
 
-All following commands run as **root**, from the approved repository or QA bundle directory.
-The **Linux/server team** owns network checks: DNS, correct system time, TLS/CA trust,
-routing/proxy rules, outbound HTTPS to the tenant token endpoint on TCP 443 and
-SMTP to `smtp.office365.com` on TCP 587. These are operator checks, not questions
-for the client's email administrator. The checks below validate local prerequisites,
-token acquisition and actual SMTP delivery without changing network security policy.
+```bash
+cd /root/smtp-qa
+cat /etc/os-release
+uname -m
+```
+
+Use the RPM matching the server's distribution, major version and architecture.
+The Linux team checks DNS, system time, TLS trust and outbound TCP 443/587.
 
 Install OS prerequisites from your approved repositories:
 
@@ -262,20 +247,19 @@ Sources: [Microsoft SMTP App RBAC onboarding](https://learn.microsoft.com/en-us/
 [SMTP OAuth and application tokens](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth).
 Verified against these pages on 2026-11-02.
 
-## Release gate — still required
+## Manual platform QA checklist
 
-For each AlmaLinux, Rocky Linux, RHEL and Oracle Linux major 8/9/10 and intended
-architecture, build the matching RPM and
-run native/deployment tests. In disposable VMs with SELinux **enforcing**, check
-install, restart, reboot, labels/AVCs, drift rejection, import rollback at each
-interruption point, legacy uninstall and interrupted uninstall. Verify no external
-SMTP listener, queue preservation, unchanged firewall and correct baseline restore.
+Repeat the walkthrough below on each intended distribution/version before rollout:
 
-With an approved test tenant and recipient, verify token acquisition, ordinary and
-forced-refresh SMTP delivery, concurrent workers, expired/revoked secret, unavailable
-token endpoint, malformed response, and certificate rejection. Confirm mailbox
-scope isolation and queue retry after recovery. Review logs for token/secret leakage.
-Do not treat a container build or mocked HTTP tests as these acceptance tests.
+- Install and send successfully, including forced token renewal.
+- Reboot and send again.
+- Reject bad credentials; recover from network failure and interrupted import.
+- Keep mail queued until delivery succeeds; check logs contain no secrets.
+- Run SELinux enforcing, check for denials, and confirm only localhost listens.
+- Uninstall and confirm the previous configuration and service state return.
+
+Record the platform, package version and results. Live tenant and RHEL qualification
+remain pending; container builds alone do not establish production readiness.
 
 ## CLI QA walkthrough (isolated test host)
 
@@ -410,10 +394,8 @@ On your **workstation browser**, as the test tenant administrator:
    it, stop and resolve the design/policy with the administrator; do not disable
    tenant-wide Security Defaults simply to make the test pass.
 
-Download the matching unsigned QA artifact from a successful exact-commit Actions
-run as described above, and verify its provenance and checksums. Do not compile
-on the client VM. On the **Linux test VM**, use only CLI commands. Follow the deployment steps above's matching RPM and
-OS prerequisite installation, then prepare the private JSON:
+Download the matching QA bundle and install its RPM and prerequisites as described
+above. On the **Linux test VM**, prepare the private JSON:
 
 ```bash
 install -d -m 700 /root/smtp-oauth
