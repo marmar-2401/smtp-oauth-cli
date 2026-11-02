@@ -51,14 +51,32 @@ temporary unprivileged user, then installs it with DNF. No GitHub Actions,
 release downloads, manual compilation, or GitHub login are needed. First install
 requires HTTPS access to `raw.githubusercontent.com` and `codeload.github.com`.
 
-Only already enabled, approved repositories are used. They must supply compiler
-and development dependencies, including `jsoncpp-devel`, `libcurl-devel` and
-`cyrus-sasl-devel`. If a dependency is missing, ask the Linux administrator to
-provide it through approved development repositories: PowerTools/CRB for Alma/Rocky,
-CodeReady Builder for Oracle/RHEL, and EPEL where needed. RHEL requires suitable
-subscriptions. The installer never enables repositories or forces package removal.
+The installer checks repository health and exact dependency availability before
+building. If required repositories are disabled, it shows their names and asks
+separately before enabling them. `install --yes` does not approve repository changes.
+You can check first without installing packages or changing repository configuration:
+
+```bash
+bash smtp-oauth-deploy.sh repos
+# Review and approve repository setup if the check reports missing dependencies:
+bash smtp-oauth-deploy.sh repos --setup
+```
+
+EL8/9 use PowerTools/CRB (Oracle/RHEL CodeReady Builder) plus EPEL for
+`jsoncpp-devel`; Oracle uses its own EPEL release package. EL10 needs CRB/CodeReady
+Builder for that package, **not EPEL**. Existing approved mirrors are accepted when
+they supply the packages. Missing vendor definitions, RHEL registration/content
+access, exclusions and broken network/metadata require the Linux administrator;
+the diagnostic distinguishes these from missing packages. Repository changes remain
+after uninstall. No cross-distribution OS repositories or security overrides are added.
 Local RPMs are unsigned; hosts requiring signed local packages need an approved
 signing process. Signature policy is not bypassed.
+
+Repository references: [Fedora EPEL](https://docs.fedoraproject.org/en-US/epel/getting-started/),
+[Rocky](https://docs.rockylinux.org/10/teams/rel_eng/repo/),
+[AlmaLinux](https://wiki.almalinux.org/repos/Extras.html),
+[Oracle](https://yum.oracle.com/getting-started.html), and
+[Red Hat EL10 package manifest](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html-single/package_manifest/index).
 
 Automatic builds are limited to x86_64 on the listed EL versions and build natively
 for the detected host. An already installed matching custom `sasl-xoauth2-m365-cli`
