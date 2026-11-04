@@ -134,8 +134,9 @@ package skips compilation and must pass integrity/capability checks. Stock
 `sasl-xoauth2` is not interchangeable; an existing plugin or relay needs a planned
 migration first.
 
-Compiler/development packages remain installed. Source RPMs, the license, build
-logs and provenance are retained in root-only `/var/lib/smtp-oauth-cli-builds`.
+Compiler/development packages remain installed. After a successful build, source
+RPMs, the license, build logs and provenance are retained in root-only
+`/var/lib/smtp-oauth-cli-builds`; failed-build logs are not archived.
 A failed build leaves these installed dependencies but does not configure the relay.
 
 Expect `Installed` and no errors from `status`. An empty token cache before the
@@ -190,8 +191,10 @@ Postfix or its active credentials:
 bash smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
 ```
 
-This checks native token acquisition. On helper failure it makes one additional,
-bounded token POST to classify the failure; it never activates the diagnostic token.
+This checks native token acquisition. If the helper's token acquisition fails, it
+makes one additional, bounded token POST to classify the failure; local access or
+helper configuration failures stop before that diagnostic POST. The diagnostic
+token is never activated.
 Only `test` verifies SMTP authorization and delivery acceptance. For an SMTP failure,
 the email administrator checks the selected authorization route, sender permissions
 and SMTP AUTH policy. Do not disable TLS checks or SELinux to clear an error.
