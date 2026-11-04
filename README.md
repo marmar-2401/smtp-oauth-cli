@@ -34,11 +34,12 @@ administrator owns expiry tracking and supplies the replacement securely.
    not the secret ID. Keep the old secret active. Normal rotation uses the same
    app/tenant and does not require a new app registration or changed mailbox grants.
 2. **Linux operator:** receive the value through the approved secure channel. Keep
-   the old value in the approved secure store until testing succeeds. As root, edit
-   only `client_secret` in the mode-600 JSON; keep tenant, client ID and mailbox unchanged:
+   a protected copy of the previous JSON until testing succeeds. As root, back it up
+   in the private configuration directory, then edit only `client_secret` in the mode-600 JSON; keep tenant, client ID and mailbox unchanged:
 
    ```bash
    cd /root/smtp-oauth-cli
+   install -m 600 /root/smtp-oauth/client.json /root/smtp-oauth/client.previous.json
    vi /root/smtp-oauth/client.json
    bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json
    bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
@@ -51,9 +52,19 @@ administrator owns expiry tracking and supplies the replacement securely.
 3. **Both teams:** require `RELAY ACCEPTED`, confirm the recipient received the message,
    and check status for errors. Forced refresh proves a new token can be obtained
    with the replacement. If testing fails, keep the old secret active; resolve the
-   reported error or securely restore its value in the JSON and repeat import/test.
+   reported error or re-import the protected backup:
+
+   ```bash
+   install -m 600 /root/smtp-oauth/client.previous.json /root/smtp-oauth/client.json
+   bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json
+   bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
+   ```
+
+   Import commits before the SMTP test. `recover-import` handles an interrupted
+   import; it does **not** undo an already completed import.
 4. **Email administrator:** only after successful testing and updating any other
    consumers of that app secret, remove the old secret and record the next renewal.
+   The Linux operator can then delete `/root/smtp-oauth/client.previous.json`.
 
 See Microsoft's [app credential instructions](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-credentials).
 Microsoft recommends certificate or federated credentials for production; this
