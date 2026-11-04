@@ -65,6 +65,83 @@ workdir() {
     WORK=$(mktemp -d /var/tmp/smtp-oauth-cli.XXXXXXXX)
     chmod 700 "$WORK"
 }
+auth_failure() {
+    local message=$1
+    if command -v ausearch >/dev/null && ausearch -m AVC,USER_AVC -ts recent -c test-config > "$WORK/avc.log" 2>/dev/null; then
+        say 'Recent SELinux audit events for test-config exist. Check their time/context locally; they are not proof of this failure. No SELinux policy was changed.' >&2
+    fi
+    die "$message No candidate was activated; existing relay credentials were preserved."
+}
+candidate_helper() {
+    # Independent of the operator's protected /root checkout/current directory.
+    timeout --kill-after=5s 120 runuser -u postfix -- sh -c 'cd / && exec "$@"' sh "$CONFIG_TEST" "$@"
+}
+classify_token_response() {
+    local rc=$1 http=$2 response=$3 code
+    case "$rc" in
+        0) ;;
+        5|6) say 'AUTH-DNS: token POST could not resolve the proxy or Microsoft host.'; return ;;
+        7|28) say 'AUTH-NETWORK: token POST connection failed or timed out.'; return ;;
+        35|51|58|60|77) say 'AUTH-TLS: token POST failed TLS/CA verification; check trust, time and approved proxy settings.'; return ;;
+        23|26|63|153) say 'AUTH-LOCAL-IO: diagnostic request/response could not be read or written, or exceeded its size limit.'; return ;;
+        124|137) say 'AUTH-TIMEOUT: diagnostic process exceeded its bounded time limit.'; return ;;
+        *) say 'AUTH-TRANSPORT: token POST diagnostic could not complete. No raw response is displayed.'; return ;;
+    esac
+    [[ $http =~ ^[1-5][0-9][0-9]$ ]] || { say 'AUTH-HTTP: no valid HTTP status was received.'; return; }
+    if [[ $http == 200 ]]; then
+        if jq -e '.access_token | type == "string"' "$response" >/dev/null 2>&1 &&
+           jq -e '(.access_token | length > 0 and length <= 65536) and
+             (.access_token | test("^[!-~]+$")) and
+             (.token_type == "Bearer" or .token_type == "bearer") and
+             (.expires_in | type == "number" and floor == . and . > 60 and . <= 86400)' "$response" >/dev/null 2>&1; then
+            say 'AUTH-HELPER: a separate token POST succeeded with the same credentials, but the native helper failed. Investigate helper runtime/cache access or SELinux; do not replace the secret on this evidence.'
+        else
+            say 'AUTH-RESPONSE: token endpoint returned HTTP 200 with an invalid or unsupported token response.'
+        fi
+        return
+    fi
+    # Only fixed, recognized codes are emitted. Never print descriptions, tokens,
+    # identifiers, arbitrary error strings, response headers or response bodies.
+    for code in 7000215 7000222 700016 90002 7000218 700027 500011; do
+        if jq -e --argjson code "$code" '(.error_codes | type == "array") and (.error_codes | index($code) != null)' "$response" >/dev/null 2>&1; then
+            case "$code" in
+                7000215) say 'AUTH-ENTRA AADSTS7000215: Microsoft rejected the client secret value.' ;;
+                7000222) say 'AUTH-ENTRA AADSTS7000222: Microsoft reports an expired client secret.' ;;
+                700016) say 'AUTH-ENTRA AADSTS700016: Microsoft could not find the application in the requested tenant.' ;;
+                90002) say 'AUTH-ENTRA AADSTS90002: Microsoft could not find the requested tenant.' ;;
+                7000218) say 'AUTH-ENTRA AADSTS7000218: Microsoft reports missing client authentication.' ;;
+                700027) say 'AUTH-ENTRA AADSTS700027: Microsoft rejected client assertion authentication.' ;;
+                500011) say 'AUTH-ENTRA AADSTS500011: Microsoft could not find the requested resource principal.' ;;
+            esac
+            return
+        fi
+    done
+    case "$http" in
+        3??) say "AUTH-HTTP $http: redirect refused; token requests never follow redirects." ;;
+        400|401) say "AUTH-HTTP $http: token POST rejected without a recognized safe diagnostic code. The administrator can inspect Entra service-principal sign-in logs." ;;
+        403) say 'AUTH-HTTP 403: access denied by the endpoint or an intermediary; this does not prove the secret is wrong.' ;;
+        429|5??) say "AUTH-HTTP $http: endpoint throttling/service failure; retry later." ;;
+        *) say "AUTH-HTTP $http: unexpected token endpoint response." ;;
+    esac
+}
+diagnose_token_request() {
+    local rc=0 http
+    command -v curl >/dev/null || { say 'AUTH-DIAGNOSTIC: curl is unavailable; native helper failure could not be classified further.'; return; }
+    jq -jr '"grant_type=client_credentials&client_id=" + (.client_id|@uri) +
+        "&client_secret=" + (.client_secret|@uri) + "&scope=https%3A%2F%2Foutlook.office365.com%2F.default"' \
+        "$WORK/config.json" > "$WORK/request.form"
+    chown root:postfix "$WORK/request.form"; chmod 640 "$WORK/request.form"
+    # The form/response stay in protected files, never argv or terminal output.
+    # ulimit also bounds chunked responses on older curl versions.
+    if http=$(timeout --kill-after=5s 55 runuser -u postfix -- sh -c '
+        cd / && ulimit -f 512 && exec "$@"' sh curl --disable --silent --show-error \
+        --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 45 --max-filesize 262144 \
+        --cacert "$CA" --header 'Content-Type: application/x-www-form-urlencoded' \
+        --data-binary "@$WORK/request.form" --output "$WORK/runtime/diagnostic.json" \
+        --write-out '%{http_code}' "$endpoint" 2> "$WORK/diagnostic.log"); then rc=0; else rc=$?; fi
+    classify_token_response "$rc" "$http" "$WORK/runtime/diagnostic.json"
+    rm -f -- "$WORK/request.form" "$WORK/runtime/diagnostic.json" "$WORK/diagnostic.log"
+}
 prepare_candidate() {
     workdir
     chgrp postfix "$WORK"; chmod 710 "$WORK"
@@ -74,8 +151,22 @@ prepare_candidate() {
     chmod 640 "$WORK/config.json"; chown root:postfix "$WORK/config.json"
     printf '{}\n' >"$WORK/runtime/token.json"
     chmod 600 "$WORK/runtime/token.json"; chown postfix:postfix "$WORK/runtime/token.json"
-    if ! timeout 90 runuser -u postfix -- "$CONFIG_TEST" --config "$WORK/config.json" --token "$WORK/runtime/token.json" >"$WORK/helper.log" 2>&1; then
-        die 'Application token request failed. Check the approved credential, expiry, tenant, CA trust and HTTPS access. No candidate was activated; raw output is withheld.'
+    if ! runuser -u postfix -- test -r "$WORK/config.json" ||
+       ! runuser -u postfix -- test -r "$CA" ||
+       ! runuser -u postfix -- test -r "$WORK/runtime/token.json" ||
+       ! runuser -u postfix -- test -w "$WORK/runtime"; then
+        auth_failure 'AUTH-LOCAL-ACCESS: postfix cannot read the staged configuration/CA/cache or write its private cache directory. Check file permissions and SELinux.'
+    fi
+    local helper_rc=0
+    if candidate_helper --config "$WORK/config.json" > "$WORK/helper.log" 2>&1; then :; else
+        helper_rc=$?
+        auth_failure "AUTH-HELPER-CONFIG: native helper could not execute or load its configuration (exit $helper_rc). This failed before a token request. Check runtime libraries, permissions and SELinux."
+    fi
+    if candidate_helper --config "$WORK/config.json" --token "$WORK/runtime/token.json" > "$WORK/helper.log" 2>&1; then :; else
+        helper_rc=$?
+        say "Native token helper failed (exit $helper_rc). Running one bounded, redacted token POST diagnostic; a HEAD request does not test this exchange." >&2
+        diagnose_token_request >&2
+        auth_failure 'Application token validation failed. Use the AUTH diagnostic above to identify the failing stage.'
     fi
     say 'Application token request passed. Postfix acquires and caches tokens on demand; test verifies SMTP authorization separately.'
 }
@@ -890,8 +981,8 @@ main() {
     command -v jq >/dev/null || die 'Install jq before using this script.'
     case "$cmd" in
         recover-import) recover_main ;;
-        check) prerequisites; if [[ -n $INPUT ]]; then validate_config "$INPUT"; say "Credential structure passed for $provider / $mailbox."; fi
-               say 'Local prerequisites passed. install validates the application token request; test verifies relay acceptance.' ;;
+        check) prerequisites; if [[ -n $INPUT ]]; then validate_config "$INPUT"; prepare_candidate "$INPUT"; fi
+               say 'Prerequisites passed. check --config validates token acquisition without changing the relay; test verifies SMTP authorization.' ;;
         install) [[ -n $INPUT ]] || die '--config is required.'; install_main ;;
         import-token) [[ -n $INPUT ]] || die '--config is required.'; import_main ;;
         status) status_main ;;

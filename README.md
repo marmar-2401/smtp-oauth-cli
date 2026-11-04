@@ -127,9 +127,24 @@ postqueue -p
 journalctl -u postfix --since '10 minutes ago' --no-pager
 ```
 
-If sending fails, check the reported error and network access. Ask the email
-administrator to check secret expiry, mailbox access and SMTP AUTH policy.
-Do not disable TLS checks or SELinux to clear an error.
+If installation or credential import fails, the installer now identifies the stage:
+local file/helper access, TLS/network, token endpoint HTTP/recognized Entra errors,
+or native-helper failure after a separate successful token request. It never prints
+secrets, tokens or raw server responses. A successful website/HEAD check does not
+validate a token POST. Existing relay credentials are preserved on candidate failure.
+
+If needed later, repeat the same protected configuration check without changing
+Postfix or its active credentials:
+
+```bash
+bash smtp-oauth-deploy.sh check --config /root/smtp-oauth/client.json
+```
+
+This checks native token acquisition. On helper failure it makes one additional,
+bounded token POST to classify the failure; it never activates the diagnostic token.
+Only `test` verifies SMTP authorization and delivery acceptance. For an SMTP failure,
+the email administrator checks the selected authorization route, sender permissions
+and SMTP AUTH policy. Do not disable TLS checks or SELinux to clear an error.
 
 **Replace an expiring secret:** ask the administrator for a replacement, edit the
 private JSON, then run these commands. Keep the old secret valid until the test passes.
@@ -188,12 +203,31 @@ The Linux operator only needs the completed JSON.
    its value, expiry date and renewal owner.
 3. Open **Enterprise applications**, select the application, and record its object ID.
    This is different from the App Registration object ID.
-4. Follow Microsoft's [SMTP Application RBAC instructions](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding):
-   register the Exchange service principal using the Enterprise Application object ID,
-   and assign **Application SMTP.SendAsApp** scoped to the sending mailbox.
-   Use this RBAC route only; do not add the Entra `SMTP.SendAsApp` API permission.
-5. Verify that this mailbox is in scope, other mailboxes are excluded, and SMTP AUTH
-   is allowed by approved tenant policy. Supply the completed JSON securely.
+4. Register the Exchange service principal using the Enterprise Application object ID.
+   Choose **one administrator-approved authorization route**:
+   - **Entra application permission route:** grant Exchange Online `SMTP.SendAsApp`
+     application permission and tenant admin consent, then grant the Exchange service
+     principal access to the intended mailbox. Follow Microsoft's
+     [client-credentials instructions](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth),
+     including its SendAs requirement for the sender. FullAccess is not a substitute
+     for SendAs. Restrict grants to the approved mailbox; these are application
+     permissions, not a mailbox user's interactive login.
+   - **Scoped Application RBAC route:** follow Microsoft's
+     [SMTP RBAC instructions](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/smtp-app-rbac-onboarding)
+     to assign `Application SMTP.SendAsApp` with a mailbox resource scope. This route
+     does not require mailbox FullAccess or the Entra `SMTP.SendAsApp` claim.
+     Microsoft warns that including that claim triggers mailbox permission checks;
+     do not assume an RBAC scope restricts grants made through the other route.
+5. Verify effective access to the intended sender and exclusion of other mailboxes,
+   then check that SMTP AUTH is allowed by approved tenant policy. A failed RBAC
+   assignment is not a completed RBAC configuration. Do not change routes or remove
+   existing grants without the email administrator's approval.
+
+Both routes use the same tenant-specific client-credentials token request and
+`https://outlook.office365.com/.default` scope. Token acquisition and SMTP mailbox
+permission are different stages: neither FullAccess nor a role assignment proves
+that the client secret works, and obtaining a token does not prove permission to send.
+NHSmail tenant approval has not been verified.
 
 If the tenant blocks this method, stop and agree another design. Do not disable
 Security Defaults or weaken tenant-wide protection to make the script work.
