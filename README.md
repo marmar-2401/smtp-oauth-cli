@@ -14,12 +14,51 @@ Copy this into the setup request:
 
 > Please provide:
 > 1. The sending mailbox address.
-> 2. Confirmation that application-only OAuth SMTP sending is allowed without mailbox sign-in.
+> 2. Approval for commercial Microsoft 365 / Exchange Online **app-only SMTP using an Entra app registration and client secret**, with access to the sending mailbox through one of the authorization routes below. No mailbox password, browser sign-in or delegated user flow is used.
 > 3. A completed `m365-client-template.json`, sent through our secure channel. Your email administrator supplies the tenant ID, application ID and secret, and grants mailbox access. Do not paste secrets into the task.
-> 4. An email administrator contact, test recipient, and owner for renewing the secret before expiry.
+> 4. An email administrator contact, approved test recipient, secret expiration date, and named client email administrator responsible for arranging renewal **before expiration**, with time for Linux import and delivery testing.
 >
 > Your email team handles Microsoft permissions. Our Linux team handles server networking and Postfix.
 > If application-only SMTP is not allowed, tell us before setup.
+
+### Agree secret renewal at handover
+
+The script supports replacing a client secret on the existing installation. It
+renews access tokens automatically, **not the app registration secret**; it does
+not discover the secret's expiration date or schedule renewal. The client email
+administrator owns expiry tracking and supplies the replacement securely.
+
+1. **Email administrator:** in Entra **App registrations > the existing app >
+   Certificates & secrets > Client secrets > New client secret**, add a replacement
+   before the current one expires. Record its new expiry and copy the **Value**,
+   not the secret ID. Keep the old secret active. Normal rotation uses the same
+   app/tenant and does not require a new app registration or changed mailbox grants.
+2. **Linux operator:** receive the value through the approved secure channel. Keep
+   the old value in the approved secure store until testing succeeds. As root, edit
+   only `client_secret` in the mode-600 JSON; keep tenant, client ID and mailbox unchanged:
+
+   ```bash
+   cd /root/smtp-oauth-cli
+   vi /root/smtp-oauth/client.json
+   bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json
+   bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
+   bash smtp-oauth-deploy.sh status
+   ```
+
+   Replace `operator@example.com` with the approved recipient. Import validates the
+   replacement before activation; import and the forced-refresh test briefly restart
+   Postfix. Despite its name, `import-token` imports the app credentials from this JSON.
+3. **Both teams:** require `RELAY ACCEPTED`, confirm the recipient received the message,
+   and check status for errors. Forced refresh proves a new token can be obtained
+   with the replacement. If testing fails, keep the old secret active; resolve the
+   reported error or securely restore its value in the JSON and repeat import/test.
+4. **Email administrator:** only after successful testing and updating any other
+   consumers of that app secret, remove the old secret and record the next renewal.
+
+See Microsoft's [app credential instructions](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-credentials).
+Microsoft recommends certificate or federated credentials for production; this
+implementation currently supports client secrets only and still requires the QA
+acceptance below. Do not treat secret rotation support as production certification.
 
 ## 2. Clone the repository
 
@@ -146,14 +185,8 @@ Only `test` verifies SMTP authorization and delivery acceptance. For an SMTP fai
 the email administrator checks the selected authorization route, sender permissions
 and SMTP AUTH policy. Do not disable TLS checks or SELinux to clear an error.
 
-**Replace an expiring secret:** ask the administrator for a replacement, edit the
-private JSON, then run these commands. Keep the old secret valid until the test passes.
-
-```bash
-vi /root/smtp-oauth/client.json
-bash smtp-oauth-deploy.sh import-token --config /root/smtp-oauth/client.json
-bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh
-```
+**Replace an expiring secret:** follow [Secret renewal at handover](#agree-secret-renewal-at-handover),
+including the forced-refresh email test before retiring the old secret.
 
 **Recover an interrupted credential import:**
 
