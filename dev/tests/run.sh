@@ -16,3 +16,5 @@ shellcheck "$repo/smtp-oauth-deploy.sh" "$repo/dev/packaging/build-rpm.sh" "$rep
 bash "$repo/dev/tests/deployment.sh"
 
 bash "$repo/dev/tests/repositories.sh"
+
+bash "$repo/dev/tests/auth-diagnostics.sh"
