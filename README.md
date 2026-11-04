@@ -15,10 +15,10 @@ Copy this into the setup request:
 > Please provide:
 > 1. The sending mailbox address.
 > 2. Approval for commercial Microsoft 365 / Exchange Online **app-only SMTP using an Entra app registration and client secret**, with access to the sending mailbox through one of the authorization routes below. No mailbox password, browser sign-in or delegated user flow is used.
-> 3. A completed `m365-client-template.json`, sent through our secure channel. Your email administrator supplies the tenant ID, application ID and secret, and grants mailbox access. Do not paste secrets into the task.
-> 4. An email administrator contact, approved test recipient, secret expiration date, and named client email administrator responsible for arranging renewal **before expiration**, with time for Linux import and delivery testing.
+> 3. A completed `m365-client-template.json`, sent through our secure channel. Your email administrator creates the app registration/client secret, supplies the tenant ID, application ID and secret value, and grants mailbox access. Do not paste secrets into the task.
+> 4. An email administrator contact, approved test recipient, secret expiration date, and named client email administrator responsible for **creating each replacement secret and delivering its value securely to our Linux operator before expiration**, allowing time for import and delivery testing.
 >
-> Your email team handles Microsoft permissions. Our Linux team handles server networking and Postfix.
+> Your email team owns app registration, Microsoft permissions, secret creation and renewal. Our Linux operator (Mark) only receives the approved credentials, updates Linux/Postfix and tests delivery; Mark does not create or renew secrets in Entra.
 > If application-only SMTP is not allowed, tell us before setup.
 
 ### Agree secret renewal at handover
