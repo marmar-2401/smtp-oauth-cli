@@ -1,14 +1,16 @@
 # Microsoft 365 SMTP OAuth from a Linux server
 
-Applications submit email to `127.0.0.1:25`. Postfix relays it through
+Applications running under any normal local Linux user can submit email to
+`127.0.0.1:25` without local SMTP authentication. Postfix relays it through
 `smtp.office365.com:587` using verified TLS and OAuth 2.0 application authentication.
 The Linux server uses an Entra application ID and client secret to obtain access
 tokens. No browser, mailbox password, interactive mailbox login, device code, or
 delegated refresh token is used.
 
 This guide matches the supplied **3.0.0 script that retains `transport_maps`**.
-Use one sending mailbox per installation. Run the commands as **root**, invoking
-the script with `bash`, even when the login shell is `ksh`.
+Use one sending mailbox per installation. Run deployment and administration
+commands as **root**, invoking the script with `bash`, even when the login shell
+is `ksh`. Applications and their users do not need root access to submit email.
 
 ## Choose the workflow
 
@@ -16,12 +18,14 @@ the script with `bash`, even when the login shell is `ksh`.
 |---|---|
 | First installation on a server | [Fresh installation](#fresh-installation) |
 | Add a second application server | [Second server: manual JSON copy and paste](#second-server-manual-json-copy-and-paste) |
+| Configure application submission for local users | [Application settings and programmer handoff](#6-configure-the-local-application) |
 | Existing SPN or other recipient-specific mail routes | [Existing transport maps](#existing-transport-maps), before installing |
 | Install failed before credential activation | [Retry a failed installation](#retry-a-failed-installation) |
 | Check credentials after the prerequisites are installed | [Validate the candidate JSON](#retry-a-failed-installation) |
 | Rotate a secret on an installed server | [Replace application credentials](#replace-application-credentials) |
 | Inspect service, token expiry, and managed settings | [Routine checks and reboot verification](#routine-checks-and-reboot-verification) |
 | Credential import was interrupted | [Recover an interrupted import](#recover-an-interrupted-import) |
+| Start over by removing and rebuilding an existing installation | [Clean reinstall](#clean-reinstall) |
 | Change mailbox or tenant, or remove the deployment | [Uninstall or migrate](#uninstall-or-migrate) |
 
 `install` creates an installation. `import-token` updates application credentials
@@ -268,8 +272,21 @@ placement or delivery through a different preserved route.
 |---|---|
 | SMTP server | `127.0.0.1` |
 | Port | `25` |
-| SMTP username/password for local submission | None |
-| From address | The configured sending mailbox |
+| Local SMTP authentication | Disabled / none; leave username and password blank |
+| Application-side OAuth configuration | None; Postfix performs Microsoft 365 OAuth authentication |
+| Envelope sender and message From address | The authorized sending mailbox configured for this installation |
+| Linux account running the application | Its normal local user or service account; root is not required |
+
+**OAuth works for submissions from all local Linux users.** The application opens
+a local SMTP connection; Postfix uses the shared application credentials and
+authorized mailbox identity when authenticating to Microsoft 365. Submitting
+users do not need their own Microsoft login, OAuth token, client secret, root
+access, or membership in the `postfix` group. They need access to the local SMTP
+listener, not to the protected credential files.
+
+Use the literal address `127.0.0.1` for localhost to match this script's IPv4
+listener. The deployment script's management commands, including its `test`
+command, require root; normal application SMTP submission does not.
 
 Use the authorized mailbox as both envelope sender and message From address unless
 the email administrator has explicitly authorized another sender. The script does
@@ -277,8 +294,45 @@ not add a general sender-rewriting map. Postfix handles verified TLS and OAuth f
 the upstream Microsoft 365 connection.
 
 The local host is the submission trust boundary: any local process that can reach
-the loopback SMTP listener can submit mail. This setup does not provide separate
-SMTP authentication or isolation for different applications on the same host.
+the loopback SMTP listener can submit mail, subject to the existing Postfix access
+and filtering rules. This setup does not provide separate SMTP authentication or
+isolation for different applications on the same host. Retained transport rules
+still determine which messages use Microsoft 365 and which use another route.
+
+#### Required handoff to programmers
+
+**After the Linux installation and server-side delivery tests pass, the task must
+be sent back to the programmers to configure the application's email submission
+process.** A successful deployment-script test does not complete application setup.
+
+The handoff must provide the configured server, the authorized sending mailbox,
+the approved test recipient, and the successful server-side test result. The
+programmers must configure the application to:
+
+1. Submit SMTP to localhost on port **25**, using **`127.0.0.1`** as the server address.
+2. Use the **authorized sender configured for the OAuth 2.0 relay** as both its
+   envelope sender and message From address.
+3. Submit locally without an SMTP username/password or application-side OAuth
+   login. **Postfix handles OAuth 2.0 authentication to Microsoft 365.**
+4. Run an application-generated test under the application's **normal non-root
+   user or service account**, and confirm recipient receipt.
+
+Do not mark application email configuration complete until the programmers have
+confirmed that the application itself submits successfully with those settings.
+If the application generates a default sender such as `appuser@hostname`, its
+submission configuration must be changed to use the authorized mailbox; this
+script does not automatically rewrite that sender.
+
+Suggested task handoff wording:
+
+> Server-side Postfix OAuth 2.0 configuration and relay testing are complete.
+> This task must be returned to the programmers to configure the application's
+> email submission process to use localhost (127.0.0.1), port 25, with the
+> authorized sender mailbox provided in this task. Configure that mailbox as
+> both the envelope sender and the message From address. No local SMTP
+> username/password or application-side OAuth login is required; Postfix handles
+> OAuth 2.0 authentication to Microsoft 365. Please test email submission from
+> the application under its normal user account and confirm recipient receipt.
 
 After the Microsoft 365 tests and any applicable retained-route tests succeed,
 resume application submissions and verify an actual application-generated message.
@@ -492,6 +546,11 @@ it is not a credential repair and it is not needed after every successful send.
 
 ## Replace application credentials
 
+For an intentional rebuild instead of an in-place credential update, use
+[Clean reinstall](#clean-reinstall). That option requires a drained queue and a
+service interruption; the import workflow below validates new credentials while
+retaining the existing installation.
+
 Access tokens renew on SMTP authentication. **The client secret does not renew
 itself.** The email administrator tracks its expiration and supplies a replacement
 before expiry. The script neither discovers the secret expiration date nor
@@ -617,6 +676,52 @@ Packages, build records, repository changes, and Microsoft-side permissions rema
 Retained transport-map files remain outside the deployment's managed files. Resolve
 any reported incomplete restore using the retained state and matching script.
 
+### Clean reinstall
+
+An uninstall followed by an install is a straightforward option for rebuilding
+an existing deployment or applying a new approved mailbox/tenant configuration.
+Keep the completed `m365-client-template.json` and the matching reviewed script.
+Uninstall does not remove `/root/smtp-oauth-cli` or that input JSON. The custom RPM
+also remains installed, so a matching package is reused without rebuilding it.
+
+For a rebuild of the same setup, use the JSON matching the working installation.
+For a mailbox or tenant change, use the new administrator-approved configuration.
+Prepare that JSON first. Pause application submissions and wait for
+`Mail queue is empty` before proceeding:
+
+```bash
+cd /root/smtp-oauth-cli
+chmod 600 m365-client-template.json
+postqueue -p
+```
+
+Replace `operator@example.com` with the approved recipient, then run:
+
+```bash
+bash smtp-oauth-deploy.sh check --config m365-client-template.json &&
+bash smtp-oauth-deploy.sh uninstall --yes &&
+bash smtp-oauth-deploy.sh install --config m365-client-template.json --yes &&
+bash smtp-oauth-deploy.sh test --recipient operator@example.com --force-refresh --yes &&
+bash smtp-oauth-deploy.sh status
+```
+
+The initial check validates candidate token acquisition before removing the
+existing setup. Each `&&` allows the next command to run only after the preceding
+command succeeds. Uninstall restores the recorded pre-install configuration;
+install then creates a fresh local OAuth deployment from the retained JSON.
+After relay acceptance, confirm recipient receipt, test any retained custom routes,
+and resume application submissions.
+
+This rebuild still needs valid credentials, working connectivity, and the correct
+script revision. It does not correct a mistyped secret or change Microsoft-side
+authorization. A pending import or managed-configuration drift can block uninstall;
+resolve the reported condition first. If uninstall succeeds but reinstall fails,
+correct the cause and retry `install` using the retained JSON. The removed
+installation's recovery state is no longer available to `recover-import`.
+
+If the first installation never activated and no installation state exists, use
+[Retry a failed installation](#retry-a-failed-installation) directly instead.
+
 ## Command reference
 
 These are the options accepted by this script:
@@ -684,6 +789,7 @@ Record the following at handover:
 
 - OS, architecture, package versions, and the exact reviewed deployment-script revision.
 - Normal and forced-refresh test queue IDs, relay-acceptance results, and recipient confirmation.
+- Return the task to the programmers with localhost/port-25 settings and the authorized sender; record their successful application-user submission test.
 - Separate tests for existing custom routes, where present.
 - Service/listener and send-test results after a planned reboot.
 - Mailbox, application/tenant identifiers, secret-expiry owner, and renewal process, without publishing secret values.
