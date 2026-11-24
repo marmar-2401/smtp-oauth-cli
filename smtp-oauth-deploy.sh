@@ -481,7 +481,7 @@ prerequisites() {
     [[ -r $CA ]] || die "Missing CA bundle: $CA"
     postconf -F smtp/unix/chroot >/dev/null || die 'The standard smtp/unix transport is missing from master.cf.'
     [[ -z $(postconf -h multi_instance_directories) ]] || die 'Use a dedicated standard Postfix instance; multiple instances require manual integration.'
-    for command in transport_maps sender_dependent_relayhost_maps sender_dependent_default_transport_maps; do
+    for command in sender_dependent_relayhost_maps sender_dependent_default_transport_maps; do
         [[ -z $(postconf -h "$command") ]] || die "Existing $command requires manual integration; use a dedicated relay instance."
     done
     [[ $(postconf -h default_transport) == smtp ]] || die 'Custom default transport requires manual integration.'
@@ -513,7 +513,7 @@ managed_settings() {
       [smtp_sasl_auth_enable]=yes [smtp_sasl_type]=cyrus [smtp_sasl_password_maps]="$BACKEND:$MAP"
       [smtp_sasl_security_options]=noanonymous [smtp_sasl_tls_security_options]=noanonymous
       [smtp_sasl_mechanism_filter]=xoauth2 [smtp_sender_dependent_authentication]=no
-      [sender_dependent_relayhost_maps]='' [sender_dependent_default_transport_maps]='' [transport_maps]=''
+      [sender_dependent_relayhost_maps]='' [sender_dependent_default_transport_maps]=''
       [default_transport]=smtp [relay_transport]=smtp
     )
 }
